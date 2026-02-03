@@ -135,7 +135,7 @@ static String readLine(WiFiClient& c) {
 }
 
 // X/Y only digits (no sign) as in Tkinter
-static bool parsePacket(const String& s, String& msg, long& x, long& y) {
+static bool parsePacket(const String& s, String& msg, float& x, float& y) {
   int iMsg = s.indexOf("MSG:");
   int iX   = s.indexOf(";X:");
   int iY   = s.indexOf(";Y:");
@@ -146,11 +146,20 @@ static bool parsePacket(const String& s, String& msg, long& x, long& y) {
   String sy = s.substring(iY + 3);
 
   sx.trim(); sy.trim();
-  for (size_t i = 0; i < sx.length(); i++) if (!isDigit(sx[i])) return false;
-  for (size_t i = 0; i < sy.length(); i++) if (!isDigit(sy[i])) return false;
+  if (sx.length() == 0 || sy.length() == 0) return false;
 
-  x = sx.toInt();
-  y = sy.toInt();
+  // allow optional sign and decimal point
+  for (size_t i = 0; i < sx.length(); i++) {
+    char c = sx[i];
+    if (!(isDigit(c) || c == '-' || c == '+' || c == '.')) return false;
+  }
+  for (size_t i = 0; i < sy.length(); i++) {
+    char c = sy[i];
+    if (!(isDigit(c) || c == '-' || c == '+' || c == '.')) return false;
+  }
+
+  x = sx.toFloat();
+  y = sy.toFloat();
   return true;
 }
 
@@ -237,7 +246,7 @@ void loop() {
     line.trim();
     if (line.length() > 0) {
       String msg;
-      long x = 0, y = 0;
+      float x = 0.0f, y = 0.0f;
 
       if (parsePacket(line, msg, x, y)) {
         // spawn (deg, step 2)
@@ -256,9 +265,9 @@ void loop() {
         client.print("ACK;MSG:");
         client.print(msg);
         client.print(";X:");
-        client.print(x);
+        client.print(x, 2);
         client.print(";Y:");
-        client.println(y);
+        client.println(y, 2);
       } else {
         client.print("ERR;BAD_PACKET;");
         client.println(line);
