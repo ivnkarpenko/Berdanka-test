@@ -5,8 +5,12 @@
 #include <WiFiS3.h>
 
 // ================== WIFI ==================
-const char* WIFI_SSID = "JetsonAP";
-const char* WIFI_PASS = "12345678";
+// Previous network (kept for reference)
+// const char* WIFI_SSID = "JetsonAP";
+// const char* WIFI_PASS = "12345678";
+// Current network
+const char* WIFI_SSID = "GABELLA";
+const char* WIFI_PASS = "J8f2829a";
 constexpr uint16_t SERVER_PORT = 3333;
 
 WiFiServer server(SERVER_PORT);
@@ -34,12 +38,6 @@ bool  zeroSet    = false;
 float zeroRoll   = 0.0f;
 float zeroPitch  = 0.0f;
 float zeroYaw    = 0.0f;
-
-// Anti-drift yaw
-float lastYaw          = 0.0f;
-unsigned long lastMove = 0;
-const float yawDriftLimitDeg   = 0.05f;
-const unsigned long yawHoldTime = 250;
 
 // Freeze yaw near gimbal lock
 float yawStable      = 0.0f;
@@ -110,13 +108,6 @@ bool readAnglesOnce(float &outRoll, float &outPitch, float &outYaw) {
   roll  -= zeroRoll;
   pitch -= zeroPitch;
   yaw   -= zeroYaw;
-
-  if (fabs(yaw - lastYaw) > yawDriftLimitDeg) {
-    lastMove = millis();
-  } else {
-    if (millis() - lastMove > yawHoldTime) yaw = lastYaw;
-  }
-  lastYaw = yaw;
 
   if (!yawStableInit) {
     yawStable = yaw;
