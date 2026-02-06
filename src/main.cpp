@@ -5,12 +5,14 @@
 #include <WiFiS3.h>
 
 // ================== WIFI ==================
-// Previous network (kept for reference)
+// Previous network 
 // const char* WIFI_SSID = "JetsonAP";
 // const char* WIFI_PASS = "12345678";
+// const char* WIFI_SSID = "GABELLA";
+// const char* WIFI_PASS = "J8f2829a";
 // Current network
-const char* WIFI_SSID = "GABELLA";
-const char* WIFI_PASS = "J8f2829a";
+const char* WIFI_SSID = "cisco";
+const char* WIFI_PASS = "cisco1234";
 constexpr uint16_t SERVER_PORT = 3333;
 
 WiFiServer server(SERVER_PORT);
@@ -164,25 +166,19 @@ static bool parsePacket(const String& s, String& msg, float& x, float& y) {
 }
 
 void wifiConnectAndStartServer() {
-  Serial.print("Connecting WiFi to: ");
+  Serial.print("Starting AP: ");
   Serial.println(WIFI_SSID);
 
   int status = WL_IDLE_STATUS;
-  while (status != WL_CONNECTED) {
-    status = WiFi.begin(WIFI_SSID, WIFI_PASS);
-    delay(800);
+  while (status != WL_AP_LISTENING && status != WL_AP_CONNECTED) {
+    status = WiFi.beginAP(WIFI_SSID, WIFI_PASS);
+    delay(1000);
     Serial.print(".");
   }
   Serial.println();
-  Serial.println("WiFi connected.");
+  Serial.println("AP started.");
 
   IPAddress ip = WiFi.localIP();
-  unsigned long t0 = millis();
-  while (ip[0] == 0 && (millis() - t0) < 15000) {
-    delay(250);
-    ip = WiFi.localIP();
-  }
-
   snprintf(lastIP, sizeof(lastIP), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
 
   server.begin();

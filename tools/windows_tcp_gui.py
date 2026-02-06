@@ -25,14 +25,15 @@ except Exception:
     ImageTk = None
 
 PORT_DEFAULT = 3333
-WIFI_SSID = "GABELLA"
-WIFI_PASS = "J8f2829a"
+WIFI_SSID = "cisco"
+WIFI_PASS = "cisco"
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Windows ⇄ Arduino UNO R4 WiFi (TCP) — Tkinter")
-        self.root.geometry("900x650")
+        self.root.title("Windows <-> Arduino UNO R4 WiFi")
+        self.root.geometry("1100x700")
+        self.root.minsize(900, 600)
 
         self.sock = None
         self.rx_thread = None
@@ -65,8 +66,27 @@ class App:
         self.log("[APP] Ready. 1) Connect Wi‑Fi 2) Connect TCP 3) Send.")
 
     def build_ui(self):
-        wifi = tk.LabelFrame(self.root, text="Wi‑Fi (Windows)", padx=10, pady=10)
-        wifi.pack(fill="x", padx=10, pady=8)
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        main = tk.Frame(self.root)
+        main.grid(row=0, column=0, sticky="nsew")
+        main.grid_rowconfigure(0, weight=1)
+        main.grid_columnconfigure(0, weight=0)
+        main.grid_columnconfigure(1, weight=1)
+
+        left = tk.Frame(main)
+        left.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        left.grid_rowconfigure(3, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+
+        right = tk.Frame(main)
+        right.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
+        right.grid_rowconfigure(2, weight=1)
+        right.grid_columnconfigure(0, weight=1)
+
+        wifi = tk.LabelFrame(left, text="Wi‑Fi (Windows)", padx=10, pady=10)
+        wifi.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         tk.Label(wifi, text="SSID:").grid(row=0, column=0, sticky="e")
         self.ed_ssid = tk.Entry(wifi, width=28)
@@ -81,12 +101,12 @@ class App:
         self.bt_wifi = tk.Button(wifi, text="Connect Wi‑Fi (netsh)", command=self.connect_wifi_windows)
         self.bt_wifi.grid(row=0, column=2, rowspan=2, padx=10, ipadx=10)
 
-        ard = tk.LabelFrame(self.root, text="Arduino TCP", padx=10, pady=10)
-        ard.pack(fill="x", padx=10, pady=8)
+        ard = tk.LabelFrame(left, text="Arduino TCP", padx=10, pady=10)
+        ard.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
         tk.Label(ard, text="IP:").grid(row=0, column=0, sticky="e")
         self.ed_ip = tk.Entry(ard, width=20)
-        self.ed_ip.insert(0, "10.42.0.2")
+        self.ed_ip.insert(0, "192.168.4.1")
         self.ed_ip.grid(row=0, column=1, padx=6)
 
         tk.Label(ard, text="Port:").grid(row=0, column=2, sticky="e")
@@ -100,8 +120,8 @@ class App:
         self.bt_disconnect = tk.Button(ard, text="Disconnect", command=self.disconnect_arduino, state="disabled")
         self.bt_disconnect.grid(row=1, column=3, pady=6, sticky="e")
 
-        send = tk.LabelFrame(self.root, text="Send", padx=10, pady=10)
-        send.pack(fill="x", padx=10, pady=8)
+        send = tk.LabelFrame(left, text="Send", padx=10, pady=10)
+        send.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
         tk.Label(send, text="Message:").grid(row=0, column=0, sticky="e")
         self.ed_msg = tk.Entry(send, width=60)
@@ -123,11 +143,13 @@ class App:
         self.bt_send.grid(row=1, column=5, padx=10, ipadx=10)
 
         # ---- Vision group
-        vision = tk.LabelFrame(self.root, text="Vision (YOLO11)", padx=10, pady=10)
-        vision.pack(fill="both", expand=True, padx=10, pady=8)
+        vision = tk.LabelFrame(right, text="Vision (YOLO11)", padx=10, pady=10)
+        vision.grid(row=0, column=0, sticky="nsew")
+        vision.grid_rowconfigure(2, weight=1)
+        vision.grid_columnconfigure(0, weight=1)
 
         top_row = tk.Frame(vision)
-        top_row.pack(fill="x")
+        top_row.grid(row=0, column=0, sticky="ew")
 
         tk.Label(top_row, text="Camera:").pack(side="left")
         self.ed_cam = tk.Entry(top_row, width=6)
@@ -161,7 +183,7 @@ class App:
         self.cb_send.pack(side="left", padx=6)
 
         fov_row = tk.Frame(vision)
-        fov_row.pack(fill="x")
+        fov_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
         tk.Label(fov_row, text="HFOV°:").pack(side="left")
         self.ed_hfov = tk.Entry(fov_row, width=6, textvariable=self.hfov)
@@ -174,15 +196,17 @@ class App:
         self.lb_res = tk.Label(fov_row, text="Res: n/a")
         self.lb_res.pack(side="left", padx=12)
 
-        self.canvas = tk.Canvas(vision, width=640, height=360, bg="black")
-        self.canvas.pack(fill="both", expand=True, pady=6)
+        self.canvas = tk.Canvas(vision, bg="black", highlightthickness=0)
+        self.canvas.grid(row=2, column=0, sticky="nsew", pady=6)
 
-        logf = tk.LabelFrame(self.root, text="Log (from Arduino)", padx=10, pady=10)
-        logf.pack(fill="both", expand=True, padx=10, pady=8)
+        logf = tk.LabelFrame(left, text="Log (from Arduino)", padx=10, pady=10)
+        logf.grid(row=3, column=0, sticky="nsew")
+        logf.grid_rowconfigure(0, weight=1)
+        logf.grid_columnconfigure(0, weight=1)
 
-        self.log_view = ScrolledText(logf, height=20, state="normal")
+        self.log_view = ScrolledText(logf, height=12, state="normal")
         self.log_view.bind("<Key>", lambda e: "break")
-        self.log_view.pack(fill="both", expand=True)
+        self.log_view.grid(row=0, column=0, sticky="nsew")
 
     def only_digits(self, new_value: str) -> bool:
         return new_value == "" or new_value.isdigit()
@@ -336,7 +360,7 @@ class App:
                     line, buf = buf.split(b"\n", 1)
                     line = line.replace(b"\r", b"").decode("utf-8", errors="replace").strip()
                     if line:
-                        self.q.put(f"[RX] {line}")
+                        self.q.put(f"[RвевX] {line}")
         except Exception as e:
             self.q.put(f"[NET] RX error: {e}")
         finally:
@@ -471,7 +495,8 @@ class App:
                         vfov = float(self.vfov.get())
                         angle_x = (cx / max(1, fw) - 0.5) * hfov
                         angle_y = (0.5 - cy / max(1, fh)) * vfov
-                        line = f"MSG:PHONE;X:{angle_x:.2f};Y:{angle_y:.2f}\n"
+                        # swap axes to match Processing expectations
+                        line = f"MSG:PHONE;X:{angle_y:.2f};Y:{angle_x:.2f}\n"
                         try:
                             self.sock.sendall(line.encode("utf-8"))
                             self.last_send_ts = now
@@ -482,17 +507,26 @@ class App:
                 # convert BGR -> RGB for Tk
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, _ = frame_rgb.shape
-                # resize to canvas size
                 canvas_w = max(1, self.canvas.winfo_width())
                 canvas_h = max(1, self.canvas.winfo_height())
-                frame_rgb = cv2.resize(frame_rgb, (canvas_w, canvas_h))
+
+                # preserve aspect ratio (letterbox)
+                scale = min(canvas_w / w, canvas_h / h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                resized = cv2.resize(frame_rgb, (new_w, new_h))
+
                 if ImageTk is not None:
-                    img = ImageTk.PhotoImage(Image.fromarray(frame_rgb))
+                    img = ImageTk.PhotoImage(Image.fromarray(resized))
                 else:
-                    png_bytes = cv2.imencode(".png", frame_rgb)[1].tobytes()
+                    png_bytes = cv2.imencode(".png", resized)[1].tobytes()
                     img = tk.PhotoImage(master=self.canvas, data=base64.b64encode(png_bytes))
+
+                self.canvas.delete("all")
+                x0 = (canvas_w - new_w) // 2
+                y0 = (canvas_h - new_h) // 2
                 self.canvas.image = img
-                self.canvas.create_image(0, 0, image=img, anchor="nw")
+                self.canvas.create_image(x0, y0, image=img, anchor="nw")
         self.root.after(30, self.update_camera)
 
 
