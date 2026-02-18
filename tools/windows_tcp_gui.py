@@ -26,7 +26,7 @@ except Exception:
 
 PORT_DEFAULT = 3333
 WIFI_SSID = "cisco"
-WIFI_PASS = "cisco"
+WIFI_PASS = "cisco1234"
 
 class App:
     def __init__(self, root: tk.Tk):
@@ -292,6 +292,8 @@ class App:
         try:
             host_info = socket.gethostbyname_ex(socket.gethostname())
             self.log(f"[NET] Local IPs: {host_info[2]}")
+            if not any(ip.startswith("192.168.4.") for ip in host_info[2]):
+                self.log("[NET] WARN: no 192.168.4.x address. PC is not on Arduino AP subnet.")
         except Exception as e:
             self.log(f"[NET] Local IPs error: {e}")
         try:

@@ -42,6 +42,7 @@ constexpr int16_t ANGLE_STEP_DEG = 2;
 constexpr int16_t TARGET_TOL_DEG = 6;
 
 constexpr uint8_t TEXT_SIZE = 1;
+constexpr uint8_t STATUS_TEXT_SIZE = 2;
 
 // HUD positions
 constexpr int16_t TXT_X_LABEL = 10;
@@ -51,9 +52,18 @@ constexpr int16_t TXT_Y_PITCH = 28;
 constexpr int16_t TXT_Y_YAW   = 46;
 constexpr int16_t TXT_Y_MSG   = 64;
 constexpr int16_t TXT_Y_IP    = 82;
+constexpr int16_t STATUS_X      = 10;
+constexpr int16_t STATUS_Y_IMU  = 110;
+constexpr int16_t STATUS_Y_TCP  = 136;
 
 // HUD auto refresh
 constexpr uint32_t HUD_REFRESH_MS = 10000;
+constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
+constexpr uint32_t TCP_POLL_MS = 80;
+constexpr uint32_t BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
+constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
+constexpr bool ENABLE_SERIAL_DEBUG = true;
+constexpr bool ENABLE_PACKET_ACK = false;
 
 // edge marker visible thickness (px)
 constexpr int16_t EDGE_VISIBLE_PX = 5;
@@ -67,6 +77,18 @@ char lastMsg[48] = "-";
 char lastIP[20]  = "0.0.0.0";
 
 uint32_t lastHudRefreshMs = 0;
+uint32_t lastTcpStatusDrawMs = 0;
+uint32_t lastTcpPollMs = 0;
+uint32_t lastBoxDrawMs = 0;
+uint32_t lastSerialDebugMs = 0;
+uint32_t lastLoopTickMs = 0;
+bool     lastTcpConnectedState = false;
+bool     tcpConnectedCached = false;
+
+char lastImuStatusLine[40] = "";
+char lastTcpStatusLine[40] = "";
+uint16_t lastImuStatusColor = 0xFFFF;
+uint16_t lastTcpStatusColor = 0xFFFF;
 
 // ================== SPAWN (from Laptop) ==================
 int16_t spawnPitchQ = 0;
@@ -97,6 +119,30 @@ const float pitchLockThreshold = 80.0f;
 static inline int16_t quantizeDeg2(float a) {
   float q = (float)ANGLE_STEP_DEG * roundf(a / (float)ANGLE_STEP_DEG);
   return (int16_t)q;
+}
+
+static inline float wrapAngle180f(float a) {
+  while (a <= -180.0f) a += 360.0f;
+  while (a >   180.0f) a -= 360.0f;
+  return a;
+}
+
+static inline int16_t wrapAngle180i(int16_t a) {
+  int32_t v = (int32_t)a;
+  while (v <= -180) v += 360;
+  while (v >   180) v -= 360;
+  return (int16_t)v;
+}
+
+static inline float deltaAngle180f(float current, float target) {
+  return wrapAngle180f(current - target);
+}
+
+static inline int16_t deltaAngle180i(int16_t current, int16_t target) {
+  int32_t d = (int32_t)current - (int32_t)target;
+  while (d <= -180) d += 360;
+  while (d >   180) d -= 360;
+  return (int16_t)d;
 }
 
 // ---------- safe clip helpers ----------
@@ -178,6 +224,44 @@ void drawStringIfChanged(int16_t x, int16_t y, const char* s, char* last, size_t
 
   strncpy(last, s, lastSz - 1);
   last[lastSz - 1] = '\0';
+}
+
+void drawStatusLineIfChanged(int16_t x, int16_t y, const char* s,
+                             uint16_t color, char* last, size_t lastSz,
+                             uint16_t &lastColor, int padWidth) {
+  if (strncmp(s, last, lastSz) == 0 && color == lastColor) return;
+
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%-*s", padWidth, s);
+
+  tft.setTextSize(STATUS_TEXT_SIZE);
+  tft.setTextColor(color, ILI9488_BLACK);
+  tft.setCursor(x, y);
+  tft.print(buf);
+
+  strncpy(last, s, lastSz - 1);
+  last[lastSz - 1] = '\0';
+  lastColor = color;
+}
+
+void drawIMUStatus(const char* text, uint16_t color) {
+  drawStatusLineIfChanged(STATUS_X, STATUS_Y_IMU, text,
+                          color, lastImuStatusLine, sizeof(lastImuStatusLine),
+                          lastImuStatusColor, 28);
+}
+
+void drawTCPStatus(bool tcpConnected) {
+  char line[40];
+  if (tcpConnected) {
+    snprintf(line, sizeof(line), "TCP OK");
+  } else {
+    snprintf(line, sizeof(line), "TCP WAIT");
+  }
+  uint16_t color = tcpConnected ? ILI9488_GREEN : ILI9488_YELLOW;
+
+  drawStatusLineIfChanged(STATUS_X, STATUS_Y_TCP, line,
+                          color, lastTcpStatusLine, sizeof(lastTcpStatusLine),
+                          lastTcpStatusColor, 28);
 }
 
 // Полный рефреш HUD (раз в 10 сек)
@@ -268,13 +352,14 @@ bool readAnglesOnce(float &outRoll, float &outPitch, float &outYaw) {
   roll  -= zeroRoll;
   pitch -= zeroPitch;
   yaw   -= zeroYaw;
+  yaw    = wrapAngle180f(yaw);
 
-  if (fabs(yaw - lastYaw) > yawDriftLimitDeg) {
+  if (fabsf(deltaAngle180f(yaw, lastYaw)) > yawDriftLimitDeg) {
     lastMove = millis();
   } else {
     if (millis() - lastMove > yawHoldTime) yaw = lastYaw;
   }
-  lastYaw = yaw;
+  lastYaw = wrapAngle180f(yaw);
 
   if (!yawStableInit) {
     yawStable = yaw;
@@ -284,7 +369,7 @@ bool readAnglesOnce(float &outRoll, float &outPitch, float &outYaw) {
 
   outRoll  = roll;
   outPitch = pitch;
-  outYaw   = yawStable;
+  outYaw   = wrapAngle180f(yawStable);
   return true;
 }
 
@@ -353,6 +438,7 @@ void wifiConnectAndStartServer() {
 bool     lastBoxValid = false;
 int16_t  lastBoxX = 0, lastBoxY = 0, lastBoxW = 0, lastBoxH = 0;
 uint16_t lastBoxColor = 0xFFFF;
+bool     lastBoxHollow = false;
 
 void eraseOldBox() {
   if (!lastBoxValid) return;
@@ -361,16 +447,22 @@ void eraseOldBox() {
   lastBoxValid = false;
 }
 
-void drawNewBox(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
-  tft.fillRect(x, y, w, h, color);
+void drawNewBox(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color, bool hollow) {
+  if (hollow) {
+    tft.fillRect(x, y, w, h, ILI9488_BLACK);
+    tft.drawRect(x, y, w, h, color);
+  } else {
+    tft.fillRect(x, y, w, h, color);
+  }
   drawCrossInRect(x, y, w, h);
 
   lastBoxValid = true;
   lastBoxX = x; lastBoxY = y; lastBoxW = w; lastBoxH = h;
   lastBoxColor = color;
+  lastBoxHollow = hollow;
 }
 
-void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget) {
+void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget, bool tcpConnected) {
   int32_t centerX = (int32_t)lroundf((float)CX + (float)yawRelQ * PX_PER_DEG);
   int32_t centerY = (int32_t)lroundf((float)CY + (float)pitchRelQ * PX_PER_DEG);
 
@@ -392,14 +484,21 @@ void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget) {
   }
 
   uint16_t color = onTarget ? ILI9488_GREEN : ILI9488_RED;
+  bool hollow = !tcpConnected;
 
   if (lastBoxValid &&
       nx == lastBoxX && ny == lastBoxY && nw == lastBoxW && nh == lastBoxH) {
 
-    if (color != lastBoxColor) {
-      tft.fillRect(nx, ny, nw, nh, color);
+    if (color != lastBoxColor || hollow != lastBoxHollow) {
+      if (hollow) {
+        tft.fillRect(nx, ny, nw, nh, ILI9488_BLACK);
+        tft.drawRect(nx, ny, nw, nh, color);
+      } else {
+        tft.fillRect(nx, ny, nw, nh, color);
+      }
       drawCrossInRect(nx, ny, nw, nh);
       lastBoxColor = color;
+      lastBoxHollow = hollow;
     } else {
       drawCrossInRect(nx, ny, nw, nh);
     }
@@ -407,7 +506,7 @@ void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget) {
   }
 
   eraseOldBox();
-  drawNewBox(nx, ny, nw, nh, color);
+  drawNewBox(nx, ny, nw, nh, color, hollow);
 }
 
 // ================== Arduino ==================
@@ -423,32 +522,27 @@ void setup() {
   tft.fillScreen(ILI9488_BLACK);
   drawCrossFull();
   drawStaticTextLabels();
+  drawTCPStatus(false);
 
   Wire.begin();
   Wire.setClock(400000);
 
-  tft.setTextSize(2);
-  tft.setTextColor(ILI9488_YELLOW, ILI9488_BLACK);
-  tft.setCursor(10, 110);
-  tft.print(F("Init IMU..."));
+  drawIMUStatus("IMU INIT...", ILI9488_YELLOW);
+  Serial.println("IMU init started.");
 
   while (!startIMU()) {
-    tft.setTextColor(ILI9488_RED, ILI9488_BLACK);
-    tft.setCursor(10, 110);
-    tft.print(F("IMU init fail, retry... "));
+    drawIMUStatus("IMU INIT FAIL", ILI9488_RED);
+    Serial.println("IMU init fail, retry...");
     delay(200);
   }
 
-  tft.setTextColor(ILI9488_GREEN, ILI9488_BLACK);
-  tft.setCursor(10, 110);
-  tft.print(F("IMU OK                "));
+  drawIMUStatus("IMU OK", ILI9488_GREEN);
+  Serial.println("IMU OK.");
   delay(150);
 
-  tft.setTextColor(ILI9488_BLACK, ILI9488_BLACK);
-  tft.setCursor(10, 110);
-  tft.print(F("                      "));
-
   wifiConnectAndStartServer();
+  drawTCPStatus(false);
+  Serial.println("TCP status: WAIT.");
 
   tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
   tft.setTextSize(TEXT_SIZE);
@@ -459,8 +553,14 @@ void setup() {
 }
 
 void loop() {
+  uint32_t loopStartUs = micros();
+  uint32_t nowMs = millis();
+  uint32_t loopDtMs = (lastLoopTickMs == 0) ? 0 : (nowMs - lastLoopTickMs);
+  lastLoopTickMs = nowMs;
+
   float roll = 0, pitch = 0, yaw = 0;
   bool got = false;
+  uint32_t imuReadUs = 0;
 
   uint32_t t0 = micros();
   while (true) {
@@ -470,6 +570,7 @@ void loop() {
     got = true;
     if (micros() - t0 > 2500) break;
   }
+  imuReadUs = micros() - t0;
   if (!got) return;
 
   // swap roll/pitch
@@ -477,7 +578,7 @@ void loop() {
 
   int16_t rQ = quantizeDeg2(roll);
   int16_t pQ = quantizeDeg2(pitch);
-  int16_t yQ = quantizeDeg2(yaw);
+  int16_t yQ = wrapAngle180i(quantizeDeg2(yaw));
 
   // обновляем числа (быстро)
   drawValueIfChanged(TXT_X_VAL, TXT_Y_ROLL,  rQ, lastDispRoll);
@@ -485,18 +586,25 @@ void loop() {
   drawValueIfChanged(TXT_X_VAL, TXT_Y_YAW,   yQ, lastDispYaw);
 
   // ===== NET accept =====
-  if (!client || !client.connected()) {
-    WiFiClient newClient = server.available();
-    if (newClient) {
-      client = newClient;
-      client.setTimeout(5);
-      client.println("HELLO from UNO R4 WiFi");
-      Serial.println("Client connected.");
+  if (nowMs - lastTcpPollMs >= TCP_POLL_MS) {
+    lastTcpPollMs = nowMs;
+
+    bool connectedNow = (client && client.connected());
+    if (!connectedNow) {
+      WiFiClient newClient = server.available();
+      if (newClient) {
+        client = newClient;
+        client.setTimeout(5);
+        client.println("HELLO from UNO R4 WiFi");
+        Serial.println("Client connected.");
+        connectedNow = true;
+      }
     }
+    tcpConnectedCached = connectedNow;
   }
 
   // ===== NET read =====
-  if (client && client.connected() && client.available()) {
+  if (tcpConnectedCached && client.available()) {
     String line = readLine(client);
     line.trim();
     if (line.length() > 0) {
@@ -506,7 +614,7 @@ void loop() {
       if (parsePacket(line, msg, x, y)) {
         // spawn (deg, step 2)
         spawnPitchQ = quantizeDeg2((float)x);
-        spawnYawQ   = quantizeDeg2((float)y);
+        spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
         spawnSet    = true;
 
         // Msg на HUD
@@ -515,13 +623,15 @@ void loop() {
         msgBuf[30] = '\0';
         drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
 
-        // ACK
-        client.print("ACK;MSG:");
-        client.print(msg);
-        client.print(";X:");
-        client.print(x, 2);
-        client.print(";Y:");
-        client.println(y, 2);
+        // ACK can be disabled to reduce Wi-Fi blocking latency.
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;MSG:");
+          client.print(msg);
+          client.print(";X:");
+          client.print(x, 2);
+          client.print(";Y:");
+          client.println(y, 2);
+        }
       } else {
         client.print("ERR;BAD_PACKET;");
         client.println(line);
@@ -529,17 +639,50 @@ void loop() {
     }
   }
 
+  bool tcpConnected = tcpConnectedCached;
+  if (tcpConnected != lastTcpConnectedState) {
+    Serial.println(tcpConnected ? "TCP state -> OK" : "TCP state -> WAIT");
+    lastTcpConnectedState = tcpConnected;
+  }
+
+  if (millis() - lastTcpStatusDrawMs >= TCP_STATUS_REFRESH_MS) {
+    drawTCPStatus(tcpConnected);
+    lastTcpStatusDrawMs = millis();
+  }
+
   // ===== BOX draw =====
   int16_t pitchRelQ = pQ - (spawnSet ? spawnPitchQ : 0);
-  int16_t yawRelQ   = yQ - (spawnSet ? spawnYawQ   : 0);
+  int16_t yawRelQ   = deltaAngle180i(yQ, (spawnSet ? spawnYawQ : 0));
 
   bool onTarget = (abs((int)pitchRelQ) <= TARGET_TOL_DEG) &&
                   (abs((int)yawRelQ)   <= TARGET_TOL_DEG);
 
-  updateBox(pitchRelQ, yawRelQ, onTarget);
+  if (nowMs - lastBoxDrawMs >= BOX_REFRESH_MS) {
+    updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected);
+    lastBoxDrawMs = nowMs;
+  }
 
   // ===== HUD refresh every 10s =====
   if (millis() - lastHudRefreshMs >= HUD_REFRESH_MS) {
     refreshHUDForce(rQ, pQ, yQ);
+  }
+
+  uint32_t loopUs = micros() - loopStartUs;
+  if (ENABLE_SERIAL_DEBUG && (millis() - lastSerialDebugMs >= SERIAL_DEBUG_MS)) {
+    Serial.print("DBG loop_dt_ms=");
+    Serial.print(loopDtMs);
+    Serial.print(" loop_us=");
+    Serial.print(loopUs);
+    Serial.print(" imu_us=");
+    Serial.print(imuReadUs);
+    Serial.print(" tcp=");
+    Serial.print(tcpConnected ? "OK" : "WAIT");
+    Serial.print(" yaw=");
+    Serial.print(yQ);
+    Serial.print(" spawnYaw=");
+    Serial.print(spawnYawQ);
+    Serial.print(" yawRel=");
+    Serial.println(yawRelQ);
+    lastSerialDebugMs = millis();
   }
 }
