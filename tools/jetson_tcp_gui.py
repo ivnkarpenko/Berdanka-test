@@ -3,6 +3,7 @@ import threading
 import subprocess
 import queue
 import tkinter as tk
+import os
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 import time
@@ -358,16 +359,46 @@ class App:
         if YOLO is None:
             messagebox.showwarning("YOLO", "ultralytics not installed. Install: pip install ultralytics")
             return
-        model_path = self.yolo_model_path.get().strip()
-        if not model_path:
+        model_path_raw = self.yolo_model_path.get().strip()
+        if not model_path_raw:
             messagebox.showwarning("YOLO", "Model path is empty.")
             return
+
+        # Load only local weights on Jetson to avoid online download failures.
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = []
+        if os.path.isabs(model_path_raw):
+            candidates.append(model_path_raw)
+        else:
+            candidates.append(model_path_raw)
+            candidates.append(os.path.join(script_dir, model_path_raw))
+            candidates.append(os.path.join(script_dir, "models", model_path_raw))
+
+        model_path = None
+        for c in candidates:
+            p = os.path.abspath(os.path.expanduser(os.path.expandvars(c)))
+            if os.path.isfile(p):
+                model_path = p
+                break
+
+        if model_path is None:
+            msg = (
+                "Local model file not found.\n\n"
+                "Place weights on Jetson (for example tools/models/yolo11n.pt)\n"
+                "and set Model path to that file."
+            )
+            self.yolo_model = None
+            self.log(f"[YOLO] Model not found locally: {model_path_raw}")
+            messagebox.showwarning("YOLO", msg)
+            return
+
         try:
             self.yolo_model = YOLO(model_path)
             self.log(f"[YOLO] Loaded model: {model_path}")
         except Exception as e:
             self.yolo_model = None
-            messagebox.showwarning("YOLO", f"Failed to load model: {e}")
+            self.log(f"[YOLO] Failed to load local model: {model_path}; error: {e}")
+            messagebox.showwarning("YOLO", f"Failed to load local model:\n{model_path}\n\n{e}")
 
     def start_camera(self):
         if cv2 is None:
