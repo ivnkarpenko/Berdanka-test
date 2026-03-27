@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <math.h>
+#include <EEPROM.h>
 #include <Adafruit_GFX.h>
 #include <ILI9488.h>
 #include "ICM_20948.h"
@@ -64,6 +65,7 @@ constexpr uint32_t BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
 constexpr bool ENABLE_PACKET_ACK = false;
+constexpr bool ENABLE_PERIODIC_HUD_REFRESH = false;
 
 // edge marker visible thickness (px)
 constexpr int16_t EDGE_VISIBLE_PX = 5;
@@ -95,6 +97,16 @@ int16_t spawnPitchQ = 0;
 int16_t spawnYawQ   = 0;
 bool    spawnSet    = false;
 
+struct PersistedTarget {
+  uint32_t magic;
+  int16_t pitchQ;
+  int16_t yawQ;
+  char msg[31];
+};
+
+constexpr uint32_t TARGET_MAGIC = 0x42524441UL; // "BRDA"
+constexpr int EEPROM_TARGET_ADDR = 0;
+
 // ================== IMU ==================
 ICM_20948_I2C imu;
 
@@ -103,6 +115,11 @@ bool  zeroSet    = false;
 float zeroRoll   = 0.0f;
 float zeroPitch  = 0.0f;
 float zeroYaw    = 0.0f;
+uint32_t zeroArmMs = 0;
+uint32_t lastZeroCountdownDrawMs = 0;
+
+constexpr uint32_t ZERO_DELAY_MS = 10000;
+constexpr uint32_t ZERO_COUNTDOWN_REFRESH_MS = 200;
 
 // Anti-drift yaw
 float lastYaw          = 0.0f;
@@ -226,6 +243,32 @@ void drawStringIfChanged(int16_t x, int16_t y, const char* s, char* last, size_t
   last[lastSz - 1] = '\0';
 }
 
+void saveTargetToEEPROM(const char* msg) {
+  PersistedTarget target{};
+  target.magic = TARGET_MAGIC;
+  target.pitchQ = spawnPitchQ;
+  target.yawQ = spawnYawQ;
+
+  strncpy(target.msg, msg, sizeof(target.msg) - 1);
+  target.msg[sizeof(target.msg) - 1] = '\0';
+
+  EEPROM.put(EEPROM_TARGET_ADDR, target);
+}
+
+bool loadTargetFromEEPROM() {
+  PersistedTarget target{};
+  EEPROM.get(EEPROM_TARGET_ADDR, target);
+
+  if (target.magic != TARGET_MAGIC) return false;
+
+  spawnPitchQ = quantizeDeg2((float)target.pitchQ);
+  spawnYawQ = wrapAngle180i(target.yawQ);
+  spawnSet = true;
+
+  drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, target.msg, lastMsg, sizeof(lastMsg), 30);
+  return true;
+}
+
 void drawStatusLineIfChanged(int16_t x, int16_t y, const char* s,
                              uint16_t color, char* last, size_t lastSz,
                              uint16_t &lastColor, int padWidth) {
@@ -287,6 +330,20 @@ void refreshHUDForce(int16_t rollQ, int16_t pitchQ, int16_t yawQ) {
   char ip[80]; snprintf(ip, sizeof(ip), "%-18s", lastIP);
   tft.setCursor(TXT_X_VAL, TXT_Y_IP);  tft.print(ip);
 
+  // Force redraw status lines in case moving graphics overwrote them.
+  tft.setTextSize(STATUS_TEXT_SIZE);
+  tft.setTextColor(lastImuStatusColor, ILI9488_BLACK);
+  tft.setCursor(STATUS_X, STATUS_Y_IMU);
+  tft.print("                            ");
+  tft.setCursor(STATUS_X, STATUS_Y_IMU);
+  tft.print(lastImuStatusLine);
+
+  tft.setTextColor(lastTcpStatusColor, ILI9488_BLACK);
+  tft.setCursor(STATUS_X, STATUS_Y_TCP);
+  tft.print("                            ");
+  tft.setCursor(STATUS_X, STATUS_Y_TCP);
+  tft.print(lastTcpStatusLine);
+
   lastDispRoll  = rollQ;
   lastDispPitch = pitchQ;
   lastDispYaw   = yawQ;
@@ -309,6 +366,41 @@ bool startIMU() {
   if (imu.resetFIFO()  != ICM_20948_Stat_Ok) return false;
 
   return true;
+}
+
+void applyZeroCalibration(float roll, float pitch, float yaw, uint32_t nowMs) {
+  zeroRoll = roll;
+  zeroPitch = pitch;
+  zeroYaw = yaw;
+  zeroSet = true;
+
+  // Rebase the local target to the new zero reference so the marker
+  // does not jump away from center immediately after calibration.
+  spawnPitchQ = 0;
+  spawnYawQ = 0;
+  spawnSet = false;
+
+  lastYaw = 0.0f;
+  lastMove = nowMs;
+  yawStable = 0.0f;
+  yawStableInit = true;
+
+  drawIMUStatus("IMU OK", ILI9488_GREEN);
+  Serial.println("Zero calibration applied.");
+}
+
+void updateZeroCountdown(uint32_t nowMs) {
+  if (zeroSet) return;
+  if (nowMs - lastZeroCountdownDrawMs < ZERO_COUNTDOWN_REFRESH_MS) return;
+
+  uint32_t elapsed = nowMs - zeroArmMs;
+  uint32_t remainingMs = (elapsed >= ZERO_DELAY_MS) ? 0 : (ZERO_DELAY_MS - elapsed);
+  uint32_t remainingSec = (remainingMs + 999U) / 1000U;
+
+  char line[40];
+  snprintf(line, sizeof(line), "ZERO IN %lus", (unsigned long)remainingSec);
+  drawIMUStatus(line, ILI9488_YELLOW);
+  lastZeroCountdownDrawMs = nowMs;
 }
 
 bool readAnglesOnce(float &outRoll, float &outPitch, float &outYaw) {
@@ -343,10 +435,10 @@ bool readAnglesOnce(float &outRoll, float &outPitch, float &outYaw) {
                        1.0f - 2.0f * (q2*q2 + q3*q3)) * 180.0f / PI;
 
   if (!zeroSet) {
-    zeroRoll  = roll;
-    zeroPitch = pitch;
-    zeroYaw   = yaw;
-    zeroSet   = true;
+    outRoll = roll;
+    outPitch = pitch;
+    outYaw = wrapAngle180f(yaw);
+    return true;
   }
 
   roll  -= zeroRoll;
@@ -524,6 +616,15 @@ void setup() {
   drawStaticTextLabels();
   drawTCPStatus(false);
 
+  if (loadTargetFromEEPROM()) {
+    Serial.print("Target restored: pitch=");
+    Serial.print(spawnPitchQ);
+    Serial.print(" yaw=");
+    Serial.println(spawnYawQ);
+  } else {
+    Serial.println("No saved target in EEPROM.");
+  }
+
   Wire.begin();
   Wire.setClock(400000);
 
@@ -538,6 +639,9 @@ void setup() {
 
   drawIMUStatus("IMU OK", ILI9488_GREEN);
   Serial.println("IMU OK.");
+  zeroArmMs = millis();
+  lastZeroCountdownDrawMs = 0;
+  drawIMUStatus("ZERO IN 10s", ILI9488_YELLOW);
   delay(150);
 
   wifiConnectAndStartServer();
@@ -557,6 +661,10 @@ void loop() {
   uint32_t nowMs = millis();
   uint32_t loopDtMs = (lastLoopTickMs == 0) ? 0 : (nowMs - lastLoopTickMs);
   lastLoopTickMs = nowMs;
+  uint32_t netPollUs = 0;
+  uint32_t netReadUs = 0;
+  uint32_t boxDrawUs = 0;
+  uint32_t hudRefreshUs = 0;
 
   float roll = 0, pitch = 0, yaw = 0;
   bool got = false;
@@ -573,6 +681,16 @@ void loop() {
   imuReadUs = micros() - t0;
   if (!got) return;
 
+  if (!zeroSet) {
+    updateZeroCountdown(nowMs);
+    if (nowMs - zeroArmMs >= ZERO_DELAY_MS) {
+      applyZeroCalibration(roll, pitch, yaw, nowMs);
+      roll = 0.0f;
+      pitch = 0.0f;
+      yaw = 0.0f;
+    }
+  }
+
   // swap roll/pitch
   float tmp = roll; roll = pitch; pitch = tmp;
 
@@ -587,6 +705,7 @@ void loop() {
 
   // ===== NET accept =====
   if (nowMs - lastTcpPollMs >= TCP_POLL_MS) {
+    uint32_t tcpPollStartUs = micros();
     lastTcpPollMs = nowMs;
 
     bool connectedNow = (client && client.connected());
@@ -601,10 +720,12 @@ void loop() {
       }
     }
     tcpConnectedCached = connectedNow;
+    netPollUs = micros() - tcpPollStartUs;
   }
 
   // ===== NET read =====
   if (tcpConnectedCached && client.available()) {
+    uint32_t tcpReadStartUs = micros();
     String line = readLine(client);
     line.trim();
     if (line.length() > 0) {
@@ -622,6 +743,8 @@ void loop() {
         msg.toCharArray(msgBuf, sizeof(msgBuf));
         msgBuf[30] = '\0';
         drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
+        saveTargetToEEPROM(msgBuf);
+        Serial.println("Target saved to EEPROM.");
 
         // ACK can be disabled to reduce Wi-Fi blocking latency.
         if (ENABLE_PACKET_ACK) {
@@ -637,6 +760,7 @@ void loop() {
         client.println(line);
       }
     }
+    netReadUs = micros() - tcpReadStartUs;
   }
 
   bool tcpConnected = tcpConnectedCached;
@@ -658,13 +782,17 @@ void loop() {
                   (abs((int)yawRelQ)   <= TARGET_TOL_DEG);
 
   if (nowMs - lastBoxDrawMs >= BOX_REFRESH_MS) {
+    uint32_t boxDrawStartUs = micros();
     updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected);
     lastBoxDrawMs = nowMs;
+    boxDrawUs = micros() - boxDrawStartUs;
   }
 
   // ===== HUD refresh every 10s =====
-  if (millis() - lastHudRefreshMs >= HUD_REFRESH_MS) {
+  if (ENABLE_PERIODIC_HUD_REFRESH && (millis() - lastHudRefreshMs >= HUD_REFRESH_MS)) {
+    uint32_t hudRefreshStartUs = micros();
     refreshHUDForce(rQ, pQ, yQ);
+    hudRefreshUs = micros() - hudRefreshStartUs;
   }
 
   uint32_t loopUs = micros() - loopStartUs;
@@ -675,6 +803,14 @@ void loop() {
     Serial.print(loopUs);
     Serial.print(" imu_us=");
     Serial.print(imuReadUs);
+    Serial.print(" tcp_poll_us=");
+    Serial.print(netPollUs);
+    Serial.print(" tcp_read_us=");
+    Serial.print(netReadUs);
+    Serial.print(" box_us=");
+    Serial.print(boxDrawUs);
+    Serial.print(" hud_us=");
+    Serial.print(hudRefreshUs);
     Serial.print(" tcp=");
     Serial.print(tcpConnected ? "OK" : "WAIT");
     Serial.print(" yaw=");
