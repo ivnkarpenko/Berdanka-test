@@ -46,6 +46,7 @@ class App:
         self.camera_running = False
         self.yolo_enabled = tk.BooleanVar(value=False)
         self.send_enabled = tk.BooleanVar(value=False)
+        self.show_center_cross = tk.BooleanVar(value=True)
         self.rate_hz = tk.IntVar(value=5)
         self.hfov = tk.DoubleVar(value=90.0)
         self.vfov = tk.DoubleVar(value=30.0)
@@ -54,6 +55,7 @@ class App:
         self.last_frame = None
         self.last_det = None
         self.last_det_center = None
+        self.calibrated_center_norm = (0.5, 0.5)
         self.last_det_ts = 0.0
         self.last_send_ts = 0.0
         self.single_request = False
@@ -142,6 +144,9 @@ class App:
         self.bt_send = tk.Button(send, text="Send", command=self.send_packet)
         self.bt_send.grid(row=1, column=5, padx=10, ipadx=10)
 
+        self.bt_center = tk.Button(send, text="Centering", command=self.send_center_command)
+        self.bt_center.grid(row=1, column=6, padx=6, ipadx=10)
+
         # ---- Vision group
         vision = tk.LabelFrame(right, text="Vision (YOLO11)", padx=10, pady=10)
         vision.grid(row=0, column=0, sticky="nsew")
@@ -181,6 +186,9 @@ class App:
 
         self.cb_send = tk.Checkbutton(top_row, text="Send Center", variable=self.send_enabled)
         self.cb_send.pack(side="left", padx=6)
+
+        self.cb_cross = tk.Checkbutton(top_row, text="Show Cross", variable=self.show_center_cross)
+        self.cb_cross.pack(side="left", padx=6)
 
         fov_row = tk.Frame(vision)
         fov_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -334,21 +342,41 @@ class App:
         self.bt_disconnect.configure(state="disabled")
 
     def send_packet(self):
-        if not self.sock:
-            messagebox.showwarning("Send", "Not connected to Arduino.")
-            return
-
         msg = self.ed_msg.get().strip()
         x = self.ed_x.get().strip() or "0"
         y = self.ed_y.get().strip() or "0"
-
         line = f"MSG:{msg};X:{x};Y:{y}\n"
+
+        self.send_line(line, warn_title="Send")
+
+    def send_center_command(self):
+        if self.last_frame is not None and self.last_det_center is not None:
+            fh, fw = self.last_frame.shape[:2]
+            cx, cy = self.last_det_center
+            self.calibrated_center_norm = (
+                cx / max(1, fw),
+                cy / max(1, fh),
+            )
+            self.log(f"[CAL] Vision center set from detection: {cx},{cy}")
+        else:
+            self.calibrated_center_norm = (0.5, 0.5)
+            self.log("[CAL] Vision center set to geometric frame center.")
+
+        self.send_line("CMD:CENTER\n", warn_title="Centering")
+
+    def send_line(self, line: str, warn_title: str = "Send"):
+        if not self.sock:
+            messagebox.showwarning(warn_title, "Not connected to Arduino.")
+            return False
+
         try:
             self.sock.sendall(line.encode("utf-8"))
             self.log(f"[TX] {line.strip()}")
+            return True
         except Exception as e:
             self.log(f"[NET] Send error: {e}")
             self.disconnect_arduino()
+            return False
 
     def rx_loop(self):
         buf = b""
@@ -495,8 +523,10 @@ class App:
                         cx, cy = self.last_det_center
                         hfov = float(self.hfov.get())
                         vfov = float(self.vfov.get())
-                        angle_x = (cx / max(1, fw) - 0.5) * hfov
-                        angle_y = (0.5 - cy / max(1, fh)) * vfov
+                        ref_x = self.calibrated_center_norm[0] * fw
+                        ref_y = self.calibrated_center_norm[1] * fh
+                        angle_x = ((cx - ref_x) / max(1, fw)) * hfov
+                        angle_y = ((ref_y - cy) / max(1, fh)) * vfov
                         # swap axes to match Processing expectations
                         line = f"MSG:PHONE;X:{angle_y:.2f};Y:{angle_x:.2f}\n"
                         try:
@@ -529,6 +559,13 @@ class App:
                 y0 = (canvas_h - new_h) // 2
                 self.canvas.image = img
                 self.canvas.create_image(x0, y0, image=img, anchor="nw")
+                if self.show_center_cross.get():
+                    cross_x = x0 + int(self.calibrated_center_norm[0] * new_w)
+                    cross_y = y0 + int(self.calibrated_center_norm[1] * new_h)
+                    self.canvas.create_line(cross_x - 16, cross_y, cross_x + 16, cross_y, fill="#ff4040", width=2)
+                    self.canvas.create_line(cross_x, cross_y - 16, cross_x, cross_y + 16, fill="#ff4040", width=2)
+                    self.canvas.create_oval(cross_x - 3, cross_y - 3, cross_x + 3, cross_y + 3,
+                                            outline="#ff4040", width=2)
         self.root.after(30, self.update_camera)
 
 

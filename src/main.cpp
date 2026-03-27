@@ -478,6 +478,10 @@ static String readLine(WiFiClient& c) {
   return line;
 }
 
+static bool isCenterCommand(const String& s) {
+  return s == "CMD:CENTER";
+}
+
 static bool parsePacket(const String& s, String& msg, float& x, float& y) {
   int iMsg = s.indexOf("MSG:");
   int iX   = s.indexOf(";X:");
@@ -729,35 +733,52 @@ void loop() {
     String line = readLine(client);
     line.trim();
     if (line.length() > 0) {
-      String msg;
-      float x = 0.0f, y = 0.0f;
-
-      if (parsePacket(line, msg, x, y)) {
-        // spawn (deg, step 2)
-        spawnPitchQ = quantizeDeg2((float)x);
-        spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
+      if (isCenterCommand(line)) {
+        spawnPitchQ = pQ;
+        spawnYawQ   = yQ;
         spawnSet    = true;
 
-        // Msg на HUD
-        char msgBuf[48];
-        msg.toCharArray(msgBuf, sizeof(msgBuf));
-        msgBuf[30] = '\0';
-        drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
-        saveTargetToEEPROM(msgBuf);
-        Serial.println("Target saved to EEPROM.");
+        drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, "CENTER", lastMsg, sizeof(lastMsg), 30);
+        saveTargetToEEPROM("CENTER");
+        Serial.print("Center command applied: pitch=");
+        Serial.print(spawnPitchQ);
+        Serial.print(" yaw=");
+        Serial.println(spawnYawQ);
 
-        // ACK can be disabled to reduce Wi-Fi blocking latency.
         if (ENABLE_PACKET_ACK) {
-          client.print("ACK;MSG:");
-          client.print(msg);
-          client.print(";X:");
-          client.print(x, 2);
-          client.print(";Y:");
-          client.println(y, 2);
+          client.println("ACK;CMD:CENTER");
         }
       } else {
-        client.print("ERR;BAD_PACKET;");
-        client.println(line);
+        String msg;
+        float x = 0.0f, y = 0.0f;
+
+        if (parsePacket(line, msg, x, y)) {
+          // spawn (deg, step 2)
+          spawnPitchQ = quantizeDeg2((float)x);
+          spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
+          spawnSet    = true;
+
+          // Msg на HUD
+          char msgBuf[48];
+          msg.toCharArray(msgBuf, sizeof(msgBuf));
+          msgBuf[30] = '\0';
+          drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
+          saveTargetToEEPROM(msgBuf);
+          Serial.println("Target saved to EEPROM.");
+
+          // ACK can be disabled to reduce Wi-Fi blocking latency.
+          if (ENABLE_PACKET_ACK) {
+            client.print("ACK;MSG:");
+            client.print(msg);
+            client.print(";X:");
+            client.print(x, 2);
+            client.print(";Y:");
+            client.println(y, 2);
+          }
+        } else {
+          client.print("ERR;BAD_PACKET;");
+          client.println(line);
+        }
       }
     }
     netReadUs = micros() - tcpReadStartUs;
