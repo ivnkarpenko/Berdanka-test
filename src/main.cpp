@@ -37,7 +37,7 @@ constexpr int16_t CY = SCREEN_H / 2;
 ILI9488 tft(TFT_CS, TFT_DC, TFT_RST);
 
 // ================== UI ==================
-constexpr float   PX_PER_DEG = 3.0f;   // px per degree
+constexpr float   DEFAULT_DEG_PER_PX = 1.0f / 3.0f;
 constexpr int16_t BOX_SIZE   = 50;
 constexpr int16_t ANGLE_STEP_DEG = 2;
 constexpr int16_t TARGET_TOL_DEG = 6;
@@ -61,6 +61,7 @@ constexpr int16_t STATUS_Y_TCP  = 136;
 constexpr uint32_t HUD_REFRESH_MS = 10000;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
 constexpr uint32_t TCP_POLL_MS = 80;
+constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 2500;
 constexpr uint32_t BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
@@ -86,11 +87,13 @@ uint32_t lastSerialDebugMs = 0;
 uint32_t lastLoopTickMs = 0;
 bool     lastTcpConnectedState = false;
 bool     tcpConnectedCached = false;
+uint32_t lastTcpAliveMs = 0;
 
 char lastImuStatusLine[40] = "";
 char lastTcpStatusLine[40] = "";
 uint16_t lastImuStatusColor = 0xFFFF;
 uint16_t lastTcpStatusColor = 0xFFFF;
+float    displayDegPerPx = DEFAULT_DEG_PER_PX;
 
 // ================== SPAWN (from Laptop) ==================
 int16_t spawnPitchQ = 0;
@@ -255,6 +258,11 @@ void saveTargetToEEPROM(const char* msg) {
   EEPROM.put(EEPROM_TARGET_ADDR, target);
 }
 
+void clearTargetInEEPROM() {
+  PersistedTarget target{};
+  EEPROM.put(EEPROM_TARGET_ADDR, target);
+}
+
 bool loadTargetFromEEPROM() {
   PersistedTarget target{};
   EEPROM.get(EEPROM_TARGET_ADDR, target);
@@ -379,6 +387,8 @@ void applyZeroCalibration(float roll, float pitch, float yaw, uint32_t nowMs) {
   spawnPitchQ = 0;
   spawnYawQ = 0;
   spawnSet = false;
+  clearTargetInEEPROM();
+  drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, "-", lastMsg, sizeof(lastMsg), 30);
 
   lastYaw = 0.0f;
   lastMove = nowMs;
@@ -482,6 +492,27 @@ static bool isCenterCommand(const String& s) {
   return s == "CMD:CENTER";
 }
 
+static bool isPingCommand(const String& s) {
+  return s == "PING";
+}
+
+static bool parseDisplayDegPerPxCommand(const String& s, float& degPerPx) {
+  const String prefix = "CFG:DEG_PER_PX:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail.length() == 0) return false;
+
+  for (size_t i = 0; i < tail.length(); i++) {
+    char c = tail[i];
+    if (!(isDigit(c) || c == '-' || c == '+' || c == '.')) return false;
+  }
+
+  degPerPx = tail.toFloat();
+  return degPerPx > 0.0f;
+}
+
 static bool parsePacket(const String& s, String& msg, float& x, float& y) {
   int iMsg = s.indexOf("MSG:");
   int iX   = s.indexOf(";X:");
@@ -559,8 +590,9 @@ void drawNewBox(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color, bool
 }
 
 void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget, bool tcpConnected) {
-  int32_t centerX = (int32_t)lroundf((float)CX + (float)yawRelQ * PX_PER_DEG);
-  int32_t centerY = (int32_t)lroundf((float)CY + (float)pitchRelQ * PX_PER_DEG);
+  float pxPerDeg = (displayDegPerPx > 0.0001f) ? (1.0f / displayDegPerPx) : (1.0f / DEFAULT_DEG_PER_PX);
+  int32_t centerX = (int32_t)lroundf((float)CX + (float)yawRelQ * pxPerDeg);
+  int32_t centerY = (int32_t)lroundf((float)CY + (float)pitchRelQ * pxPerDeg);
 
   int32_t boxX = centerX - BOX_SIZE / 2;
   int32_t boxY = centerY - BOX_SIZE / 2;
@@ -720,8 +752,14 @@ void loop() {
         client.setTimeout(5);
         client.println("HELLO from UNO R4 WiFi");
         Serial.println("Client connected.");
+        lastTcpAliveMs = nowMs;
         connectedNow = true;
       }
+    }
+    if (connectedNow && lastTcpAliveMs != 0 && (nowMs - lastTcpAliveMs > TCP_ALIVE_TIMEOUT_MS)) {
+      client.stop();
+      connectedNow = false;
+      Serial.println("TCP heartbeat timeout.");
     }
     tcpConnectedCached = connectedNow;
     netPollUs = micros() - tcpPollStartUs;
@@ -733,7 +771,21 @@ void loop() {
     String line = readLine(client);
     line.trim();
     if (line.length() > 0) {
-      if (isCenterCommand(line)) {
+      float newDegPerPx = 0.0f;
+
+      if (isPingCommand(line)) {
+        lastTcpAliveMs = nowMs;
+      } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
+        lastTcpAliveMs = nowMs;
+        displayDegPerPx = newDegPerPx;
+        Serial.print("Display deg/px updated: ");
+        Serial.println(displayDegPerPx, 4);
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;CFG:DEG_PER_PX:");
+          client.println(displayDegPerPx, 4);
+        }
+      } else if (isCenterCommand(line)) {
+        lastTcpAliveMs = nowMs;
         spawnPitchQ = pQ;
         spawnYawQ   = yQ;
         spawnSet    = true;
@@ -753,6 +805,7 @@ void loop() {
         float x = 0.0f, y = 0.0f;
 
         if (parsePacket(line, msg, x, y)) {
+          lastTcpAliveMs = nowMs;
           // spawn (deg, step 2)
           spawnPitchQ = quantizeDeg2((float)x);
           spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));

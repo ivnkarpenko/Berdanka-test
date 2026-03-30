@@ -28,6 +28,7 @@ except Exception:
 PORT_DEFAULT = 3333
 WIFI_SSID = "cisco"
 WIFI_PASS = "cisco1234"
+HEARTBEAT_INTERVAL_S = 1.0
 
 
 class App:
@@ -49,9 +50,14 @@ class App:
         self.yolo_enabled = tk.BooleanVar(value=False)
         self.send_enabled = tk.BooleanVar(value=False)
         self.show_center_cross = tk.BooleanVar(value=True)
+        self.invert_x = tk.BooleanVar(value=False)
+        self.invert_y = tk.BooleanVar(value=False)
         self.rate_hz = tk.IntVar(value=5)
         self.hfov = tk.DoubleVar(value=90.0)
         self.vfov = tk.DoubleVar(value=30.0)
+        self.pitch_trim_deg = tk.DoubleVar(value=0.0)
+        self.yaw_trim_deg = tk.DoubleVar(value=0.0)
+        self.display_deg_per_px = tk.DoubleVar(value=0.3333)
         self.yolo_model = None
         self.yolo_model_path = tk.StringVar(value="yolo11n.pt")
         self.last_frame = None
@@ -60,6 +66,7 @@ class App:
         self.calibrated_center_norm = (0.5, 0.5)
         self.last_det_ts = 0.0
         self.last_send_ts = 0.0
+        self.last_heartbeat_ts = 0.0
         self.single_request = False
         self.hold_until = 0.0
         self.hold_frame = None
@@ -152,7 +159,7 @@ class App:
         # ---- Vision group
         vision = tk.LabelFrame(right, text="Vision (YOLO11)", padx=10, pady=10)
         vision.grid(row=0, column=0, sticky="nsew")
-        vision.grid_rowconfigure(2, weight=1)
+        vision.grid_rowconfigure(3, weight=1)
         vision.grid_columnconfigure(0, weight=1)
 
         top_row = tk.Frame(vision)
@@ -206,8 +213,32 @@ class App:
         self.lb_res = tk.Label(fov_row, text="Res: n/a")
         self.lb_res.pack(side="left", padx=12)
 
+        map_row = tk.Frame(vision)
+        map_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+
+        self.cb_inv_x = tk.Checkbutton(map_row, text="Invert X", variable=self.invert_x)
+        self.cb_inv_x.pack(side="left")
+
+        self.cb_inv_y = tk.Checkbutton(map_row, text="Invert Y", variable=self.invert_y)
+        self.cb_inv_y.pack(side="left", padx=6)
+
+        tk.Label(map_row, text="Pitch Trim°:").pack(side="left", padx=(12, 0))
+        self.ed_pitch_trim = tk.Entry(map_row, width=6, textvariable=self.pitch_trim_deg)
+        self.ed_pitch_trim.pack(side="left", padx=6)
+
+        tk.Label(map_row, text="Yaw Trim°:").pack(side="left")
+        self.ed_yaw_trim = tk.Entry(map_row, width=6, textvariable=self.yaw_trim_deg)
+        self.ed_yaw_trim.pack(side="left", padx=6)
+
+        tk.Label(map_row, text="Deg/Px:").pack(side="left")
+        self.ed_deg_per_px = tk.Entry(map_row, width=7, textvariable=self.display_deg_per_px)
+        self.ed_deg_per_px.pack(side="left", padx=6)
+
+        self.bt_apply_display = tk.Button(map_row, text="Apply Display", command=self.send_display_config)
+        self.bt_apply_display.pack(side="left", padx=6)
+
         self.canvas = tk.Canvas(vision, bg="black", highlightthickness=0)
-        self.canvas.grid(row=2, column=0, sticky="nsew", pady=6)
+        self.canvas.grid(row=3, column=0, sticky="nsew", pady=6)
 
         logf = tk.LabelFrame(left, text="Log (from Arduino)", padx=10, pady=10)
         logf.grid(row=3, column=0, sticky="nsew")
@@ -219,7 +250,13 @@ class App:
         self.log_view.grid(row=0, column=0, sticky="nsew")
 
     def only_digits(self, new_value: str) -> bool:
-        return new_value == "" or new_value.isdigit()
+        if new_value == "":
+            return True
+        try:
+            float(new_value)
+            return True
+        except ValueError:
+            return new_value in ("-", "+", ".", "-.", "+.")
 
     def log(self, s: str):
         self.log_view.insert("end", s + "\n")
@@ -295,6 +332,7 @@ class App:
 
         self.bt_connect.configure(state="disabled")
         self.bt_disconnect.configure(state="normal")
+        self.last_heartbeat_ts = 0.0
         self.log("[NET] Connected.")
 
     def disconnect_arduino(self):
@@ -313,6 +351,7 @@ class App:
 
         self.bt_connect.configure(state="normal")
         self.bt_disconnect.configure(state="disabled")
+        self.last_heartbeat_ts = 0.0
 
     def send_packet(self):
         msg = self.ed_msg.get().strip()
@@ -337,14 +376,28 @@ class App:
 
         self.send_line("CMD:CENTER\n", warn_title="Centering")
 
-    def send_line(self, line: str, warn_title: str = "Send"):
+    def send_display_config(self):
+        try:
+          deg_per_px = float(self.display_deg_per_px.get())
+        except Exception:
+          messagebox.showwarning("Display", "Deg/Px must be a number.")
+          return
+
+        if deg_per_px <= 0.0:
+            messagebox.showwarning("Display", "Deg/Px must be > 0.")
+            return
+
+        self.send_line(f"CFG:DEG_PER_PX:{deg_per_px:.4f}\n", warn_title="Display")
+
+    def send_line(self, line: str, warn_title: str = "Send", log_tx: bool = True):
         if not self.sock:
             messagebox.showwarning(warn_title, "Not connected to Arduino.")
             return False
 
         try:
             self.sock.sendall(line.encode("utf-8"))
-            self.log(f"[TX] {line.strip()}")
+            if log_tx:
+                self.log(f"[TX] {line.strip()}")
             return True
         except Exception as e:
             self.log(f"[NET] Send error: {e}")
@@ -380,6 +433,12 @@ class App:
                 self.log(item)
         except queue.Empty:
             pass
+
+        now = time.time()
+        if self.sock and (now - self.last_heartbeat_ts) >= HEARTBEAT_INTERVAL_S:
+            if self.send_line("PING\n", warn_title="Heartbeat", log_tx=False):
+                self.last_heartbeat_ts = now
+
         self.root.after(50, self.process_queue)
 
     # ===== Vision =====
@@ -473,6 +532,8 @@ class App:
         try:
             results = self.yolo_model.predict(frame, verbose=False, conf=0.25, classes=[67])
             if len(results) == 0:
+                self.last_det = None
+                self.last_det_center = None
                 return frame
             r = results[0]
 
@@ -501,8 +562,13 @@ class App:
                     (0, 255, 0),
                     2,
                 )
+            else:
+                self.last_det = None
+                self.last_det_center = None
             return frame
         except Exception as e:
+            self.last_det = None
+            self.last_det_center = None
             if single:
                 messagebox.showwarning("YOLO", f"Detect error: {e}")
             return frame
@@ -540,6 +606,12 @@ class App:
                         ref_y = self.calibrated_center_norm[1] * fh
                         angle_x = ((cx - ref_x) / max(1, fw)) * hfov
                         angle_y = ((ref_y - cy) / max(1, fh)) * vfov
+                        if self.invert_x.get():
+                            angle_x = -angle_x
+                        if self.invert_y.get():
+                            angle_y = -angle_y
+                        angle_x += float(self.yaw_trim_deg.get())
+                        angle_y += float(self.pitch_trim_deg.get())
                         line = f"MSG:PHONE;X:{angle_y:.2f};Y:{angle_x:.2f}\n"
                         try:
                             self.sock.sendall(line.encode("utf-8"))
