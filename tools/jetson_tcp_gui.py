@@ -29,6 +29,9 @@ PORT_DEFAULT = 3333
 WIFI_SSID = "cisco"
 WIFI_PASS = "cisco1234"
 HEARTBEAT_INTERVAL_S = 1.0
+DEFAULT_YOLO_MODEL = "yolo11n.pt"
+QUADRO_YOLO_MODEL = "yolo_quadro_weights/quadron_1280.onnx"
+QUADRO_YOLO_IMGSZ = 1280
 
 
 class App:
@@ -58,8 +61,15 @@ class App:
         self.pitch_trim_deg = tk.DoubleVar(value=0.0)
         self.yaw_trim_deg = tk.DoubleVar(value=0.0)
         self.display_deg_per_px = tk.DoubleVar(value=0.3333)
+        self.tcp_poll_ms = tk.IntVar(value=250)
+        self.box_size_px = tk.IntVar(value=50)
+        self.box_refresh_ms = tk.IntVar(value=33)
+        self.box_render_enabled = tk.BooleanVar(value=True)
+        self.box_delta_render_enabled = tk.BooleanVar(value=True)
         self.yolo_model = None
-        self.yolo_model_path = tk.StringVar(value="yolo11n.pt")
+        self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
+        self.yolo_model_preset = tk.StringVar(value=DEFAULT_YOLO_MODEL)
+        self.yolo_predict_imgsz = 640
         self.last_frame = None
         self.last_det = None
         self.last_det_center = None
@@ -159,48 +169,62 @@ class App:
         # ---- Vision group
         vision = tk.LabelFrame(right, text="Vision (YOLO11)", padx=10, pady=10)
         vision.grid(row=0, column=0, sticky="nsew")
-        vision.grid_rowconfigure(3, weight=1)
+        vision.grid_rowconfigure(5, weight=1)
         vision.grid_columnconfigure(0, weight=1)
 
-        top_row = tk.Frame(vision)
-        top_row.grid(row=0, column=0, sticky="ew")
+        cam_row = tk.Frame(vision)
+        cam_row.grid(row=0, column=0, sticky="ew")
 
-        tk.Label(top_row, text="Camera:").pack(side="left")
-        self.ed_cam = tk.Entry(top_row, width=6)
+        tk.Label(cam_row, text="Camera:").pack(side="left")
+        self.ed_cam = tk.Entry(cam_row, width=6)
         self.ed_cam.insert(0, "0")
         self.ed_cam.pack(side="left", padx=6)
 
-        self.bt_cam_start = tk.Button(top_row, text="Start Camera", command=self.start_camera)
+        self.bt_cam_start = tk.Button(cam_row, text="Start Camera", command=self.start_camera)
         self.bt_cam_start.pack(side="left", padx=6)
 
-        self.bt_cam_stop = tk.Button(top_row, text="Stop Camera", command=self.stop_camera, state="disabled")
+        self.bt_cam_stop = tk.Button(cam_row, text="Stop Camera", command=self.stop_camera, state="disabled")
         self.bt_cam_stop.pack(side="left", padx=6)
 
-        tk.Label(top_row, text="Model:").pack(side="left", padx=6)
-        self.ed_model = tk.Entry(top_row, width=20, textvariable=self.yolo_model_path)
-        self.ed_model.pack(side="left")
-
-        self.cb_yolo = tk.Checkbutton(top_row, text="YOLO On", variable=self.yolo_enabled)
-        self.cb_yolo.pack(side="left", padx=6)
-
-        self.bt_single = tk.Button(top_row, text="Single Detect", command=self.single_detect)
-        self.bt_single.pack(side="left", padx=6)
-
-        self.bt_reload = tk.Button(top_row, text="Load Model", command=self.load_model)
-        self.bt_reload.pack(side="left", padx=6)
-
-        tk.Label(top_row, text="Rate Hz:").pack(side="left", padx=6)
-        self.sc_rate = tk.Scale(top_row, from_=1, to=30, orient="horizontal", variable=self.rate_hz, length=120)
+        tk.Label(cam_row, text="Rate Hz:").pack(side="left", padx=(18, 6))
+        self.sc_rate = tk.Scale(cam_row, from_=1, to=30, orient="horizontal", variable=self.rate_hz, length=120)
         self.sc_rate.pack(side="left")
 
-        self.cb_send = tk.Checkbutton(top_row, text="Send Center", variable=self.send_enabled)
+        self.cb_yolo = tk.Checkbutton(cam_row, text="YOLO On", variable=self.yolo_enabled)
+        self.cb_yolo.pack(side="left", padx=6)
+
+        self.cb_send = tk.Checkbutton(cam_row, text="Send Center", variable=self.send_enabled)
         self.cb_send.pack(side="left", padx=6)
 
-        self.cb_cross = tk.Checkbutton(top_row, text="Show Cross", variable=self.show_center_cross)
+        self.cb_cross = tk.Checkbutton(cam_row, text="Show Cross", variable=self.show_center_cross)
         self.cb_cross.pack(side="left", padx=6)
 
+        model_row = tk.Frame(vision)
+        model_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        model_row.grid_columnconfigure(3, weight=1)
+
+        tk.Label(model_row, text="Model preset:").grid(row=0, column=0, sticky="w")
+        self.model_menu = tk.OptionMenu(
+            model_row,
+            self.yolo_model_preset,
+            DEFAULT_YOLO_MODEL,
+            QUADRO_YOLO_MODEL,
+            command=self.on_model_preset_changed,
+        )
+        self.model_menu.grid(row=0, column=1, padx=6, sticky="w")
+
+        tk.Label(model_row, text="Path:").grid(row=0, column=2, sticky="w")
+        self.ed_model = tk.Entry(model_row, width=36, textvariable=self.yolo_model_path)
+        self.ed_model.grid(row=0, column=3, padx=6, sticky="ew")
+
+        self.bt_reload = tk.Button(model_row, text="Load Model", command=self.load_model)
+        self.bt_reload.grid(row=0, column=4, padx=6, sticky="w")
+
+        self.bt_single = tk.Button(model_row, text="Single Detect", command=self.single_detect)
+        self.bt_single.grid(row=0, column=5, padx=6, sticky="w")
+
         fov_row = tk.Frame(vision)
-        fov_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        fov_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
         tk.Label(fov_row, text="HFOV°:").pack(side="left")
         self.ed_hfov = tk.Entry(fov_row, width=6, textvariable=self.hfov)
@@ -214,7 +238,7 @@ class App:
         self.lb_res.pack(side="left", padx=12)
 
         map_row = tk.Frame(vision)
-        map_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        map_row.grid(row=3, column=0, sticky="ew", pady=(6, 0))
 
         self.cb_inv_x = tk.Checkbutton(map_row, text="Invert X", variable=self.invert_x)
         self.cb_inv_x.pack(side="left")
@@ -237,8 +261,35 @@ class App:
         self.bt_apply_display = tk.Button(map_row, text="Apply Display", command=self.send_display_config)
         self.bt_apply_display.pack(side="left", padx=6)
 
+        tk.Label(map_row, text="TCP Poll ms:").pack(side="left")
+        self.ed_tcp_poll_ms = tk.Entry(map_row, width=6, textvariable=self.tcp_poll_ms)
+        self.ed_tcp_poll_ms.pack(side="left", padx=6)
+
+        self.bt_apply_net = tk.Button(map_row, text="Apply Net", command=self.send_net_config)
+        self.bt_apply_net.pack(side="left", padx=6)
+
+        self.cb_box_render = tk.Checkbutton(map_row, text="Draw Box", variable=self.box_render_enabled)
+        self.cb_box_render.pack(side="left", padx=6)
+
+        self.cb_box_delta = tk.Checkbutton(map_row, text="Delta Fill", variable=self.box_delta_render_enabled)
+        self.cb_box_delta.pack(side="left", padx=6)
+
+        box_row = tk.Frame(vision)
+        box_row.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+
+        tk.Label(box_row, text="Box Size:").pack(side="left")
+        self.ed_box_size = tk.Entry(box_row, width=5, textvariable=self.box_size_px)
+        self.ed_box_size.pack(side="left", padx=6)
+
+        tk.Label(box_row, text="Box ms:").pack(side="left")
+        self.ed_box_refresh = tk.Entry(box_row, width=5, textvariable=self.box_refresh_ms)
+        self.ed_box_refresh.pack(side="left", padx=6)
+
+        self.bt_apply_box = tk.Button(box_row, text="Apply Box", command=self.send_box_config)
+        self.bt_apply_box.pack(side="left", padx=6)
+
         self.canvas = tk.Canvas(vision, bg="black", highlightthickness=0)
-        self.canvas.grid(row=3, column=0, sticky="nsew", pady=6)
+        self.canvas.grid(row=5, column=0, sticky="nsew", pady=6)
 
         logf = tk.LabelFrame(left, text="Log (from Arduino)", padx=10, pady=10)
         logf.grid(row=3, column=0, sticky="nsew")
@@ -378,16 +429,52 @@ class App:
 
     def send_display_config(self):
         try:
-          deg_per_px = float(self.display_deg_per_px.get())
+            deg_per_px = float(self.display_deg_per_px.get())
         except Exception:
-          messagebox.showwarning("Display", "Deg/Px must be a number.")
-          return
+            messagebox.showwarning("Display", "Deg/Px must be a number.")
+            return
 
         if deg_per_px <= 0.0:
             messagebox.showwarning("Display", "Deg/Px must be > 0.")
             return
 
         self.send_line(f"CFG:DEG_PER_PX:{deg_per_px:.4f}\n", warn_title="Display")
+
+    def send_net_config(self):
+        try:
+            tcp_poll_ms = int(self.tcp_poll_ms.get())
+        except Exception:
+            messagebox.showwarning("Network", "TCP Poll ms must be an integer.")
+            return
+
+        if tcp_poll_ms < 20 or tcp_poll_ms > 2000:
+            messagebox.showwarning("Network", "TCP Poll ms must be between 20 and 2000.")
+            return
+
+        self.send_line(f"CFG:TCP_POLL_MS:{tcp_poll_ms}\n", warn_title="Network")
+
+    def send_box_config(self):
+        try:
+            box_size_px = int(self.box_size_px.get())
+            box_refresh_ms = int(self.box_refresh_ms.get())
+        except Exception:
+            messagebox.showwarning("Box", "Box settings must be integers.")
+            return
+
+        if box_size_px < 8 or box_size_px > 200:
+            messagebox.showwarning("Box", "Box Size must be between 8 and 200.")
+            return
+
+        if box_refresh_ms < 10 or box_refresh_ms > 1000:
+            messagebox.showwarning("Box", "Box ms must be between 10 and 1000.")
+            return
+
+        ok = self.send_line(f"CFG:BOX_SIZE:{box_size_px}\n", warn_title="Box")
+        ok = self.send_line(f"CFG:BOX_REFRESH_MS:{box_refresh_ms}\n", warn_title="Box") and ok
+        render_value = 1 if self.box_render_enabled.get() else 0
+        ok = self.send_line(f"CFG:BOX_RENDER:{render_value}\n", warn_title="Box") and ok
+        delta_value = 1 if self.box_delta_render_enabled.get() else 0
+        self.send_line(f"CFG:BOX_DELTA_RENDER:{delta_value}\n", warn_title="Box")
 
     def send_line(self, line: str, warn_title: str = "Send", log_tx: bool = True):
         if not self.sock:
@@ -442,6 +529,25 @@ class App:
         self.root.after(50, self.process_queue)
 
     # ===== Vision =====
+    def on_model_preset_changed(self, preset):
+        preset = str(preset).strip()
+        if preset:
+            self.yolo_model_path.set(preset)
+        self.update_yolo_model_config()
+
+    def update_yolo_model_config(self):
+        model_path = self.yolo_model_path.get().strip()
+        if model_path.endswith("quadron_1280.onnx"):
+            self.yolo_predict_imgsz = QUADRO_YOLO_IMGSZ
+        else:
+            self.yolo_predict_imgsz = 640
+
+    def get_yolo_predict_classes(self):
+        model_path = self.yolo_model_path.get().strip()
+        if model_path.endswith("quadron_1280.onnx"):
+            return None
+        return [67]
+
     def load_model(self):
         if YOLO is None:
             messagebox.showwarning("YOLO", "ultralytics not installed. Install: pip install ultralytics")
@@ -480,8 +586,9 @@ class App:
             return
 
         try:
+            self.update_yolo_model_config()
             self.yolo_model = YOLO(model_path)
-            self.log(f"[YOLO] Loaded model: {model_path}")
+            self.log(f"[YOLO] Loaded model: {model_path} imgsz={self.yolo_predict_imgsz}")
         except Exception as e:
             self.yolo_model = None
             self.log(f"[YOLO] Failed to load local model: {model_path}; error: {e}")
@@ -503,11 +610,13 @@ class App:
             self.cap = None
             messagebox.showwarning("Camera", "Cannot open camera.")
             return
+        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         self.camera_running = True
         self.bt_cam_start.configure(state="disabled")
         self.bt_cam_stop.configure(state="normal")
-        self.log(f"[CAM] Started camera {idx}")
+        self.log(f"[CAM] Started camera {idx} at {actual_w}x{actual_h}")
 
     def stop_camera(self):
         self.camera_running = False
@@ -530,7 +639,14 @@ class App:
             return frame
 
         try:
-            results = self.yolo_model.predict(frame, verbose=False, conf=0.25, classes=[67])
+            self.update_yolo_model_config()
+            results = self.yolo_model.predict(
+                frame,
+                verbose=False,
+                conf=0.25,
+                classes=self.get_yolo_predict_classes(),
+                imgsz=self.yolo_predict_imgsz,
+            )
             if len(results) == 0:
                 self.last_det = None
                 self.last_det_center = None

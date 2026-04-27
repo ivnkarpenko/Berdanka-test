@@ -38,7 +38,7 @@ ILI9488 tft(TFT_CS, TFT_DC, TFT_RST);
 
 // ================== UI ==================
 constexpr float   DEFAULT_DEG_PER_PX = 1.0f / 3.0f;
-constexpr int16_t BOX_SIZE   = 50;
+constexpr int16_t DEFAULT_BOX_SIZE   = 50;
 constexpr int16_t ANGLE_STEP_DEG = 2;
 constexpr int16_t TARGET_TOL_DEG = 6;
 
@@ -60,16 +60,16 @@ constexpr int16_t STATUS_Y_TCP  = 136;
 // HUD auto refresh
 constexpr uint32_t HUD_REFRESH_MS = 10000;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
-constexpr uint32_t TCP_POLL_MS = 80;
+constexpr uint32_t DEFAULT_TCP_POLL_MS = 80;
 constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 2500;
-constexpr uint32_t BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
+constexpr uint32_t DEFAULT_BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
 constexpr bool ENABLE_PACKET_ACK = false;
 constexpr bool ENABLE_PERIODIC_HUD_REFRESH = false;
 
 // edge marker visible thickness (px)
-constexpr int16_t EDGE_VISIBLE_PX = 5;
+constexpr int16_t DEFAULT_EDGE_VISIBLE_PX = 5;
 
 // Values on screen
 int16_t lastDispRoll  = 32767;
@@ -94,6 +94,12 @@ char lastTcpStatusLine[40] = "";
 uint16_t lastImuStatusColor = 0xFFFF;
 uint16_t lastTcpStatusColor = 0xFFFF;
 float    displayDegPerPx = DEFAULT_DEG_PER_PX;
+uint32_t tcpPollIntervalMs = DEFAULT_TCP_POLL_MS;
+int16_t  boxSizePx = DEFAULT_BOX_SIZE;
+uint32_t boxRefreshIntervalMs = DEFAULT_BOX_REFRESH_MS;
+int16_t  edgeVisiblePx = DEFAULT_EDGE_VISIBLE_PX;
+bool     boxRenderEnabled = true;
+bool     boxDeltaRenderEnabled = true;
 
 // ================== SPAWN (from Laptop) ==================
 int16_t spawnPitchQ = 0;
@@ -513,6 +519,93 @@ static bool parseDisplayDegPerPxCommand(const String& s, float& degPerPx) {
   return degPerPx > 0.0f;
 }
 
+static bool parseTcpPollMsCommand(const String& s, uint32_t& tcpPollMs) {
+  const String prefix = "CFG:TCP_POLL_MS:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail.length() == 0) return false;
+
+  for (size_t i = 0; i < tail.length(); i++) {
+    char c = tail[i];
+    if (!isDigit(c)) return false;
+  }
+
+  uint32_t value = (uint32_t)tail.toInt();
+  if (value < 20 || value > 2000) return false;
+  tcpPollMs = value;
+  return true;
+}
+
+static bool parseBoxSizeCommand(const String& s, int16_t& sizePx) {
+  const String prefix = "CFG:BOX_SIZE:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail.length() == 0) return false;
+  for (size_t i = 0; i < tail.length(); i++) {
+    if (!isDigit(tail[i])) return false;
+  }
+
+  int value = tail.toInt();
+  if (value < 8 || value > 200) return false;
+  sizePx = (int16_t)value;
+  return true;
+}
+
+static bool parseBoxRefreshMsCommand(const String& s, uint32_t& refreshMs) {
+  const String prefix = "CFG:BOX_REFRESH_MS:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail.length() == 0) return false;
+  for (size_t i = 0; i < tail.length(); i++) {
+    if (!isDigit(tail[i])) return false;
+  }
+
+  uint32_t value = (uint32_t)tail.toInt();
+  if (value < 10 || value > 1000) return false;
+  refreshMs = value;
+  return true;
+}
+
+static bool parseBoxRenderCommand(const String& s, bool& enabled) {
+  const String prefix = "CFG:BOX_RENDER:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail == "1") {
+    enabled = true;
+    return true;
+  }
+  if (tail == "0") {
+    enabled = false;
+    return true;
+  }
+  return false;
+}
+
+static bool parseBoxDeltaRenderCommand(const String& s, bool& enabled) {
+  const String prefix = "CFG:BOX_DELTA_RENDER:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail == "1") {
+    enabled = true;
+    return true;
+  }
+  if (tail == "0") {
+    enabled = false;
+    return true;
+  }
+  return false;
+}
+
 static bool parsePacket(const String& s, String& msg, float& x, float& y) {
   int iMsg = s.indexOf("MSG:");
   int iX   = s.indexOf(";X:");
@@ -574,6 +667,45 @@ void eraseOldBox() {
   lastBoxValid = false;
 }
 
+static inline void fillRectIfPositive(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  if (w > 0 && h > 0) tft.fillRect(x, y, w, h, color);
+}
+
+bool updateFilledBoxDelta(int16_t nx, int16_t ny, int16_t nw, int16_t nh, uint16_t color) {
+  if (!boxDeltaRenderEnabled) return false;
+  if (!lastBoxValid || lastBoxHollow) return false;
+  if (lastBoxColor != color) return false;
+
+  int16_t ox = lastBoxX, oy = lastBoxY, ow = lastBoxW, oh = lastBoxH;
+  int16_t ix = max(ox, nx);
+  int16_t iy = max(oy, ny);
+  int16_t ix2 = min<int16_t>(ox + ow, nx + nw);
+  int16_t iy2 = min<int16_t>(oy + oh, ny + nh);
+
+  if (ix >= ix2 || iy >= iy2) return false;
+
+  // Erase parts that belonged only to the old filled box.
+  fillRectIfPositive(ox, oy, ow, iy - oy, ILI9488_BLACK);
+  fillRectIfPositive(ox, iy2, ow, (oy + oh) - iy2, ILI9488_BLACK);
+  fillRectIfPositive(ox, iy, ix - ox, iy2 - iy, ILI9488_BLACK);
+  fillRectIfPositive(ix2, iy, (ox + ow) - ix2, iy2 - iy, ILI9488_BLACK);
+
+  // Fill only the new strips that are outside of the intersection.
+  fillRectIfPositive(nx, ny, nw, iy - ny, color);
+  fillRectIfPositive(nx, iy2, nw, (ny + nh) - iy2, color);
+  fillRectIfPositive(nx, iy, ix - nx, iy2 - iy, color);
+  fillRectIfPositive(ix2, iy, (nx + nw) - ix2, iy2 - iy, color);
+
+  drawCrossInRect(ox, oy, ow, oh);
+  drawCrossInRect(nx, ny, nw, nh);
+
+  lastBoxX = nx; lastBoxY = ny; lastBoxW = nw; lastBoxH = nh;
+  lastBoxColor = color;
+  lastBoxHollow = false;
+  lastBoxValid = true;
+  return true;
+}
+
 void drawNewBox(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color, bool hollow) {
   if (hollow) {
     tft.fillRect(x, y, w, h, ILI9488_BLACK);
@@ -594,17 +726,17 @@ void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget, bool tcpConnec
   int32_t centerX = (int32_t)lroundf((float)CX + (float)yawRelQ * pxPerDeg);
   int32_t centerY = (int32_t)lroundf((float)CY + (float)pitchRelQ * pxPerDeg);
 
-  int32_t boxX = centerX - BOX_SIZE / 2;
-  int32_t boxY = centerY - BOX_SIZE / 2;
+  int32_t boxX = centerX - boxSizePx / 2;
+  int32_t boxY = centerY - boxSizePx / 2;
 
-  if (boxX > (int32_t)SCREEN_W - EDGE_VISIBLE_PX) boxX = (int32_t)SCREEN_W - EDGE_VISIBLE_PX;
-  if (boxX < (int32_t)(-BOX_SIZE + EDGE_VISIBLE_PX)) boxX = (int32_t)(-BOX_SIZE + EDGE_VISIBLE_PX);
+  if (boxX > (int32_t)SCREEN_W - edgeVisiblePx) boxX = (int32_t)SCREEN_W - edgeVisiblePx;
+  if (boxX < (int32_t)(-boxSizePx + edgeVisiblePx)) boxX = (int32_t)(-boxSizePx + edgeVisiblePx);
 
-  if (boxY > (int32_t)SCREEN_H - EDGE_VISIBLE_PX) boxY = (int32_t)SCREEN_H - EDGE_VISIBLE_PX;
-  if (boxY < (int32_t)(-BOX_SIZE + EDGE_VISIBLE_PX)) boxY = (int32_t)(-BOX_SIZE + EDGE_VISIBLE_PX);
+  if (boxY > (int32_t)SCREEN_H - edgeVisiblePx) boxY = (int32_t)SCREEN_H - edgeVisiblePx;
+  if (boxY < (int32_t)(-boxSizePx + edgeVisiblePx)) boxY = (int32_t)(-boxSizePx + edgeVisiblePx);
 
   int16_t nx, ny, nw, nh;
-  bool ok = clipRect(boxX, boxY, BOX_SIZE, BOX_SIZE, nx, ny, nw, nh);
+  bool ok = clipRect(boxX, boxY, boxSizePx, boxSizePx, nx, ny, nw, nh);
 
   if (!ok) {
     eraseOldBox();
@@ -630,6 +762,10 @@ void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget, bool tcpConnec
     } else {
       drawCrossInRect(nx, ny, nw, nh);
     }
+    return;
+  }
+
+  if (!hollow && updateFilledBoxDelta(nx, ny, nw, nh, color)) {
     return;
   }
 
@@ -740,7 +876,7 @@ void loop() {
   drawValueIfChanged(TXT_X_VAL, TXT_Y_YAW,   yQ, lastDispYaw);
 
   // ===== NET accept =====
-  if (nowMs - lastTcpPollMs >= TCP_POLL_MS) {
+  if (nowMs - lastTcpPollMs >= tcpPollIntervalMs) {
     uint32_t tcpPollStartUs = micros();
     lastTcpPollMs = nowMs;
 
@@ -772,9 +908,45 @@ void loop() {
     line.trim();
     if (line.length() > 0) {
       float newDegPerPx = 0.0f;
+      uint32_t newTcpPollMs = 0;
+      int16_t newBoxSizePx = 0;
+      uint32_t newBoxRefreshMs = 0;
+      bool newBoxRenderEnabled = false;
+      bool newBoxDeltaRenderEnabled = false;
 
       if (isPingCommand(line)) {
         lastTcpAliveMs = nowMs;
+      } else if (parseTcpPollMsCommand(line, newTcpPollMs)) {
+        lastTcpAliveMs = nowMs;
+        tcpPollIntervalMs = newTcpPollMs;
+        Serial.print("TCP poll interval updated: ");
+        Serial.println(tcpPollIntervalMs);
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;CFG:TCP_POLL_MS:");
+          client.println(tcpPollIntervalMs);
+        }
+      } else if (parseBoxSizeCommand(line, newBoxSizePx)) {
+        lastTcpAliveMs = nowMs;
+        boxSizePx = newBoxSizePx;
+        eraseOldBox();
+        Serial.print("Box size updated: ");
+        Serial.println(boxSizePx);
+      } else if (parseBoxRefreshMsCommand(line, newBoxRefreshMs)) {
+        lastTcpAliveMs = nowMs;
+        boxRefreshIntervalMs = newBoxRefreshMs;
+        Serial.print("Box refresh ms updated: ");
+        Serial.println(boxRefreshIntervalMs);
+      } else if (parseBoxRenderCommand(line, newBoxRenderEnabled)) {
+        lastTcpAliveMs = nowMs;
+        boxRenderEnabled = newBoxRenderEnabled;
+        if (!boxRenderEnabled) eraseOldBox();
+        Serial.print("Box render updated: ");
+        Serial.println(boxRenderEnabled ? "ON" : "OFF");
+      } else if (parseBoxDeltaRenderCommand(line, newBoxDeltaRenderEnabled)) {
+        lastTcpAliveMs = nowMs;
+        boxDeltaRenderEnabled = newBoxDeltaRenderEnabled;
+        Serial.print("Box delta render updated: ");
+        Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
       } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
         lastTcpAliveMs = nowMs;
         displayDegPerPx = newDegPerPx;
@@ -855,7 +1027,9 @@ void loop() {
   bool onTarget = (abs((int)pitchRelQ) <= TARGET_TOL_DEG) &&
                   (abs((int)yawRelQ)   <= TARGET_TOL_DEG);
 
-  if (nowMs - lastBoxDrawMs >= BOX_REFRESH_MS) {
+  if (!boxRenderEnabled) {
+    eraseOldBox();
+  } else if (nowMs - lastBoxDrawMs >= boxRefreshIntervalMs) {
     uint32_t boxDrawStartUs = micros();
     updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected);
     lastBoxDrawMs = nowMs;
@@ -879,10 +1053,20 @@ void loop() {
     Serial.print(imuReadUs);
     Serial.print(" tcp_poll_us=");
     Serial.print(netPollUs);
+    Serial.print(" tcp_poll_cfg_ms=");
+    Serial.print(tcpPollIntervalMs);
     Serial.print(" tcp_read_us=");
     Serial.print(netReadUs);
     Serial.print(" box_us=");
     Serial.print(boxDrawUs);
+    Serial.print(" box_cfg_on=");
+    Serial.print(boxRenderEnabled ? 1 : 0);
+    Serial.print(" box_cfg_delta=");
+    Serial.print(boxDeltaRenderEnabled ? 1 : 0);
+    Serial.print(" box_cfg_size=");
+    Serial.print(boxSizePx);
+    Serial.print(" box_cfg_refresh_ms=");
+    Serial.print(boxRefreshIntervalMs);
     Serial.print(" hud_us=");
     Serial.print(hudRefreshUs);
     Serial.print(" tcp=");
