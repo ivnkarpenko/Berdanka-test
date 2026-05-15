@@ -1,0 +1,37 @@
+# DeepStream Quadron Detector
+
+This folder contains a minimal DeepStream `nvinfer` setup for `tools/quadron_1280.onnx`.
+
+Build the custom parser on Jetson:
+
+```bash
+cd ~/ivank/Berdanka-test/tools/deepstream_quadron
+make
+```
+
+Run a camera smoke test:
+
+```bash
+deepstream-app -c deepstream_app_quadron.txt
+```
+
+The parser expects the model output shape used by `quadron_1280.onnx`:
+
+```text
+[1, 33600, 6] = [cx, cy, w, h, object_conf, class_score]
+```
+
+The preprocessing matches the working C++ OpenCV path:
+
+```text
+input size: 1280x1280
+scale: 1 / 122
+offsets: 120;120;120
+color: RGB
+```
+
+If DeepStream is installed in a non-default directory, pass it to make:
+
+```bash
+make DEEPSTREAM_DIR=/opt/nvidia/deepstream/deepstream-6.1
+```
