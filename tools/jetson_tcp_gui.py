@@ -17,6 +17,11 @@ except Exception:
     cv2 = None
 
 try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
     from ultralytics import YOLO
 except Exception:
     YOLO = None
@@ -73,10 +78,12 @@ class App:
         self.box_render_enabled = tk.BooleanVar(value=True)
         self.box_delta_render_enabled = tk.BooleanVar(value=True)
         self.yolo_model = None
+        self.yolo_backend = None
         self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
         self.yolo_model_preset = tk.StringVar(value="YOLO11n (.pt)")
         self.yolo_conf = tk.DoubleVar(value=0.10)
         self.yolo_imgsz = tk.IntVar(value=640)
+        self.yolo_min_box_px = tk.IntVar(value=20)
         self.yolo_predict_imgsz = 640
         self.yolo_status = "YOLO: idle"
         self.last_yolo_log_ts = 0.0
@@ -242,6 +249,10 @@ class App:
         tk.Label(fov_row, text="ImgSz:").pack(side="left")
         self.ed_yolo_imgsz = tk.Entry(fov_row, width=5, textvariable=self.yolo_imgsz)
         self.ed_yolo_imgsz.pack(side="left", padx=6)
+
+        tk.Label(fov_row, text="MinBox:").pack(side="left")
+        self.ed_yolo_min_box = tk.Entry(fov_row, width=5, textvariable=self.yolo_min_box_px)
+        self.ed_yolo_min_box.pack(side="left", padx=6)
 
         tk.Label(fov_row, text="HFOV°:").pack(side="left")
         self.ed_hfov = tk.Entry(fov_row, width=6, textvariable=self.hfov)
@@ -583,10 +594,14 @@ class App:
             conf = 0.10
         return max(0.01, min(0.99, conf))
 
+    def get_yolo_min_box_px(self):
+        try:
+            min_box_px = int(self.yolo_min_box_px.get())
+        except Exception:
+            min_box_px = 20
+        return max(1, min(500, min_box_px))
+
     def load_model(self):
-        if YOLO is None:
-            messagebox.showwarning("YOLO", "ultralytics not installed. Install: pip install ultralytics")
-            return
         model_path_raw = self.yolo_model_path.get().strip()
         if not model_path_raw:
             messagebox.showwarning("YOLO", "Model path is empty.")
@@ -624,10 +639,30 @@ class App:
 
         try:
             self.update_yolo_model_config()
-            self.yolo_model = YOLO(model_path, task="detect")
-            self.log(f"[YOLO] Loaded model: {model_path} imgsz={self.yolo_predict_imgsz}")
+            if model_path.lower().endswith(".onnx"):
+                if cv2 is None or np is None:
+                    messagebox.showwarning("YOLO", "OpenCV and numpy are required for ONNX DNN inference.")
+                    return
+                net = cv2.dnn.readNet(model_path)
+                try:
+                    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA_FP16)
+                    self.log("[YOLO] OpenCV DNN backend: CUDA FP16")
+                except Exception as e:
+                    self.log(f"[YOLO] CUDA DNN backend unavailable, using default backend: {e}")
+                self.yolo_model = net
+                self.yolo_backend = "opencv_onnx"
+                self.log(f"[YOLO] Loaded ONNX via OpenCV DNN: {model_path} imgsz={self.yolo_predict_imgsz}")
+            else:
+                if YOLO is None:
+                    messagebox.showwarning("YOLO", "ultralytics not installed. Install: pip install ultralytics")
+                    return
+                self.yolo_model = YOLO(model_path, task="detect")
+                self.yolo_backend = "ultralytics"
+                self.log(f"[YOLO] Loaded model: {model_path} imgsz={self.yolo_predict_imgsz}")
         except Exception as e:
             self.yolo_model = None
+            self.yolo_backend = None
             self.log(f"[YOLO] Failed to load local model: {model_path}; error: {e}")
             messagebox.showwarning("YOLO", f"Failed to load local model:\n{model_path}\n\n{e}")
 
@@ -669,13 +704,162 @@ class App:
     def single_detect(self):
         self.single_request = True
 
+    def draw_yolo_overlay(self, frame, box, conf, box_count, kept_count):
+        x1, y1, x2, y2 = box
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+        self.last_det = (x1, y1, x2, y2, conf)
+        self.last_det_center = (cx, cy)
+        self.yolo_status = f"YOLO kept={kept_count}/{box_count} conf={conf:.2f} center={cx},{cy}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+        cv2.rectangle(frame, (8, 8), (min(frame.shape[1] - 1, 410), 42), (0, 0, 0), -1)
+        cv2.putText(
+            frame,
+            self.yolo_status,
+            (14, 33),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"target {conf:.2f}",
+            (max(0, x1), max(24, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            3,
+        )
+
+    def run_opencv_onnx(self, frame, single=False):
+        conf_threshold = self.get_yolo_conf()
+        nms_threshold = 0.5
+        imgsz = QUADRO_YOLO_IMGSZ
+        fh, fw = frame.shape[:2]
+
+        blob = cv2.dnn.blobFromImage(
+            frame,
+            1.0 / 122.0,
+            (imgsz, imgsz),
+            (120, 120, 120),
+            True,
+            False,
+            cv2.CV_32F,
+        )
+        self.yolo_model.setInput(blob)
+        try:
+            outs = self.yolo_model.forward(self.yolo_model.getUnconnectedOutLayersNames())
+        except Exception as e:
+            self.log(f"[YOLO-DNN] Forward failed with current backend, retrying CPU: {e}")
+            self.yolo_model.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+            self.yolo_model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            self.yolo_model.setInput(blob)
+            outs = self.yolo_model.forward(self.yolo_model.getUnconnectedOutLayersNames())
+
+        boxes_1280 = []
+        confidences = []
+        output_shapes = []
+        for preds in outs:
+            arr = np.asarray(preds)
+            output_shapes.append(tuple(arr.shape))
+            if arr.ndim > 2:
+                arr = arr.reshape(arr.shape[-2], -1)
+            elif arr.ndim == 2 and arr.shape[0] == 1:
+                arr = arr.reshape(arr.shape[1], -1)
+
+            for det in arr:
+                if det.shape[0] < 6:
+                    continue
+                obj_conf = float(det[4])
+                if obj_conf < conf_threshold:
+                    continue
+                class_scores = det[5:]
+                best_class_score = float(np.max(class_scores))
+                conf = obj_conf * best_class_score
+                if conf < conf_threshold:
+                    continue
+                cx, cy, bw, bh = map(float, det[:4])
+                x = cx - 0.5 * bw
+                y = cy - 0.5 * bh
+                boxes_1280.append([int(round(x)), int(round(y)), int(round(bw)), int(round(bh))])
+                confidences.append(conf)
+
+        keep = cv2.dnn.NMSBoxes(boxes_1280, confidences, conf_threshold, nms_threshold)
+        keep_indices = []
+        if len(keep) > 0:
+            keep_indices = np.asarray(keep).reshape(-1).astype(int).tolist()
+
+        sx = fw / float(imgsz)
+        sy = fh / float(imgsz)
+        candidates = []
+        min_box_px = self.get_yolo_min_box_px()
+        for idx in keep_indices:
+            x, y, bw, bh = boxes_1280[idx]
+            x1 = max(0, min(fw - 1, int(round(x * sx))))
+            y1 = max(0, min(fh - 1, int(round(y * sy))))
+            x2 = max(0, min(fw - 1, int(round((x + bw) * sx))))
+            y2 = max(0, min(fh - 1, int(round((y + bh) * sy))))
+            sw = max(0, x2 - x1)
+            sh = max(0, y2 - y1)
+            area = sw * sh
+            if sw < min_box_px or sh < min_box_px or area <= 0:
+                continue
+            center = ((x1 + x2) // 2, (y1 + y2) // 2)
+            score = confidences[idx] * 1000.0 + (area ** 0.5) * 0.7
+            if self.last_det_center is not None:
+                dx = center[0] - self.last_det_center[0]
+                dy = center[1] - self.last_det_center[1]
+                dist = (dx * dx + dy * dy) ** 0.5
+                score -= min(dist, 1000.0) * 0.6
+                if dist <= 260.0:
+                    score += 180.0
+            candidates.append((score, (x1, y1, x2, y2), confidences[idx], area))
+
+        if single:
+            best = max(candidates, default=None, key=lambda c: c[0])
+            self.log(
+                f"[YOLO-DNN] shapes={output_shapes}, raw={len(boxes_1280)}, "
+                f"kept={len(keep_indices)}, valid={len(candidates)}, "
+                f"best={None if best is None else (best[1], round(best[2], 3), best[3])}"
+            )
+        elif time.time() - self.last_yolo_log_ts >= 2.0:
+            best = max(candidates, default=None, key=lambda c: c[0])
+            self.log(
+                f"[YOLO-DNN] raw={len(boxes_1280)}, kept={len(keep_indices)}, "
+                f"valid={len(candidates)}, best={None if best is None else (best[1], round(best[2], 3), best[3])}"
+            )
+            self.last_yolo_log_ts = time.time()
+
+        if not candidates:
+            self.last_det = None
+            self.last_det_center = None
+            self.yolo_status = f"YOLO kept=0/{len(boxes_1280)}"
+            return frame
+
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        _, selected_box, selected_conf, _ = candidates[0]
+        for _, box, conf, _ in candidates[1:]:
+            cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 1)
+        self.draw_yolo_overlay(frame, selected_box, selected_conf, len(boxes_1280), len(candidates))
+        return frame
+
     def run_yolo(self, frame, single=False):
-        if YOLO is None or self.yolo_model is None:
+        if self.yolo_model is None:
             if single:
                 messagebox.showwarning("YOLO", "Model not loaded.")
             return frame
 
         try:
+            if self.yolo_backend == "opencv_onnx":
+                return self.run_opencv_onnx(frame, single=single)
+
+            if YOLO is None:
+                if single:
+                    messagebox.showwarning("YOLO", "ultralytics not installed.")
+                return frame
+
             self.update_yolo_model_config()
             results = self.yolo_model.predict(
                 frame,
@@ -694,28 +878,55 @@ class App:
             r = results[0]
 
             best = None
+            best_xyxy = None
             best_conf = 0.0
+            best_area = 0
+            best_score = -1.0
             box_count = 0
+            valid_count = 0
+            fh, fw = frame.shape[:2]
+            min_box_px = self.get_yolo_min_box_px()
             for b in r.boxes:
                 box_count += 1
                 conf = float(b.conf.item())
-                if conf > best_conf:
+                x1f, y1f, x2f, y2f = map(float, b.xyxy[0].tolist())
+                x1 = max(0, min(fw - 1, int(round(x1f))))
+                y1 = max(0, min(fh - 1, int(round(y1f))))
+                x2 = max(0, min(fw - 1, int(round(x2f))))
+                y2 = max(0, min(fh - 1, int(round(y2f))))
+                bw = max(0, x2 - x1)
+                bh = max(0, y2 - y1)
+                area = bw * bh
+                if bw < min_box_px or bh < min_box_px:
+                    continue
+                valid_count += 1
+                score = conf * area
+                if score > best_score:
+                    best_score = score
                     best_conf = conf
                     best = b
+                    best_xyxy = (x1, y1, x2, y2)
+                    best_area = area
 
             if single:
-                self.log(f"[YOLO] Detect: boxes={box_count}, best_conf={best_conf:.3f}")
+                self.log(
+                    f"[YOLO] Detect: boxes={box_count}, valid={valid_count}, "
+                    f"best_conf={best_conf:.3f}, xyxy={best_xyxy}, area={best_area}"
+                )
             elif time.time() - self.last_yolo_log_ts >= 2.0:
-                self.log(f"[YOLO] Detect: boxes={box_count}, best_conf={best_conf:.3f}")
+                self.log(
+                    f"[YOLO] Detect: boxes={box_count}, valid={valid_count}, "
+                    f"best_conf={best_conf:.3f}, xyxy={best_xyxy}, area={best_area}"
+                )
                 self.last_yolo_log_ts = time.time()
 
-            if best is not None:
-                x1, y1, x2, y2 = map(int, best.xyxy[0].tolist())
+            if best is not None and best_xyxy is not None:
+                x1, y1, x2, y2 = best_xyxy
                 cx = int((x1 + x2) / 2)
                 cy = int((y1 + y2) / 2)
                 self.last_det = (x1, y1, x2, y2, best_conf)
                 self.last_det_center = (cx, cy)
-                self.yolo_status = f"YOLO boxes={box_count} conf={best_conf:.2f} center={cx},{cy}"
+                self.yolo_status = f"YOLO valid={valid_count}/{box_count} conf={best_conf:.2f} center={cx},{cy}"
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
                 cv2.rectangle(frame, (8, 8), (min(frame.shape[1] - 1, 390), 42), (0, 0, 0), -1)
