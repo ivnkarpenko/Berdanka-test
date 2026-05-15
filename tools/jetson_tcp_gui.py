@@ -9,6 +9,8 @@ from tkinter.scrolledtext import ScrolledText
 import time
 import base64
 
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
 try:
     import cv2
 except Exception:
@@ -593,7 +595,7 @@ class App:
 
         try:
             self.update_yolo_model_config()
-            self.yolo_model = YOLO(model_path)
+            self.yolo_model = YOLO(model_path, task="detect")
             self.log(f"[YOLO] Loaded model: {model_path} imgsz={self.yolo_predict_imgsz}")
         except Exception as e:
             self.yolo_model = None
