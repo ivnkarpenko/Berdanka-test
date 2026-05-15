@@ -551,9 +551,19 @@ class App:
         model_path = MODEL_PRESETS.get(preset, preset)
         if model_path:
             self.yolo_model_path.set(model_path)
+            if model_path.lower().endswith(".onnx"):
+                self.yolo_imgsz.set(QUADRO_YOLO_IMGSZ)
+            else:
+                self.yolo_imgsz.set(640)
         self.update_yolo_model_config()
 
     def update_yolo_model_config(self):
+        model_path = self.yolo_model_path.get().strip().lower()
+        if model_path.endswith(".onnx"):
+            self.yolo_predict_imgsz = QUADRO_YOLO_IMGSZ
+            self.yolo_imgsz.set(QUADRO_YOLO_IMGSZ)
+            return
+
         try:
             imgsz = int(self.yolo_imgsz.get())
         except Exception:
