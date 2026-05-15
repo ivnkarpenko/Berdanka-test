@@ -75,6 +75,7 @@ class App:
         self.yolo_model = None
         self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
         self.yolo_model_preset = tk.StringVar(value="YOLO11n (.pt)")
+        self.yolo_conf = tk.DoubleVar(value=0.10)
         self.yolo_predict_imgsz = 640
         self.last_frame = None
         self.last_det = None
@@ -230,6 +231,10 @@ class App:
 
         fov_row = tk.Frame(vision)
         fov_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+
+        tk.Label(fov_row, text="Conf:").pack(side="left")
+        self.ed_yolo_conf = tk.Entry(fov_row, width=5, textvariable=self.yolo_conf)
+        self.ed_yolo_conf.pack(side="left", padx=6)
 
         tk.Label(fov_row, text="HFOV°:").pack(side="left")
         self.ed_hfov = tk.Entry(fov_row, width=6, textvariable=self.hfov)
@@ -554,6 +559,13 @@ class App:
             return None
         return [67]
 
+    def get_yolo_conf(self):
+        try:
+            conf = float(self.yolo_conf.get())
+        except Exception:
+            conf = 0.10
+        return max(0.01, min(0.99, conf))
+
     def load_model(self):
         if YOLO is None:
             messagebox.showwarning("YOLO", "ultralytics not installed. Install: pip install ultralytics")
@@ -651,23 +663,30 @@ class App:
             results = self.yolo_model.predict(
                 frame,
                 verbose=False,
-                conf=0.25,
+                conf=self.get_yolo_conf(),
                 classes=self.get_yolo_predict_classes(),
                 imgsz=self.yolo_predict_imgsz,
             )
             if len(results) == 0:
                 self.last_det = None
                 self.last_det_center = None
+                if single:
+                    self.log("[YOLO] Detect: no result objects returned.")
                 return frame
             r = results[0]
 
             best = None
             best_conf = 0.0
+            box_count = 0
             for b in r.boxes:
+                box_count += 1
                 conf = float(b.conf.item())
                 if conf > best_conf:
                     best_conf = conf
                     best = b
+
+            if single:
+                self.log(f"[YOLO] Detect: boxes={box_count}, best_conf={best_conf:.3f}")
 
             if best is not None:
                 x1, y1, x2, y2 = map(int, best.xyxy[0].tolist())
@@ -679,7 +698,7 @@ class App:
                 cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
                 cv2.putText(
                     frame,
-                    f"phone {best_conf:.2f}",
+                    f"target {best_conf:.2f}",
                     (x1, max(0, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -689,6 +708,8 @@ class App:
             else:
                 self.last_det = None
                 self.last_det_center = None
+                if single:
+                    self.log("[YOLO] Detect: no boxes after postprocess.")
             return frame
         except Exception as e:
             self.last_det = None
