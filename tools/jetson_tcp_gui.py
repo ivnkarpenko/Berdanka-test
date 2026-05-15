@@ -30,8 +30,12 @@ WIFI_SSID = "cisco"
 WIFI_PASS = "cisco1234"
 HEARTBEAT_INTERVAL_S = 1.0
 DEFAULT_YOLO_MODEL = "yolo11n.pt"
-QUADRO_YOLO_MODEL = "yolo_quadro_weights/quadron_1280.onnx"
+QUADRO_YOLO_MODEL = "quadron_1280.onnx"
 QUADRO_YOLO_IMGSZ = 1280
+MODEL_PRESETS = {
+    "YOLO11n (.pt)": DEFAULT_YOLO_MODEL,
+    "Quadron 1280 ONNX (.onnx)": QUADRO_YOLO_MODEL,
+}
 
 
 class App:
@@ -68,7 +72,7 @@ class App:
         self.box_delta_render_enabled = tk.BooleanVar(value=True)
         self.yolo_model = None
         self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
-        self.yolo_model_preset = tk.StringVar(value=DEFAULT_YOLO_MODEL)
+        self.yolo_model_preset = tk.StringVar(value="YOLO11n (.pt)")
         self.yolo_predict_imgsz = 640
         self.last_frame = None
         self.last_det = None
@@ -207,8 +211,7 @@ class App:
         self.model_menu = tk.OptionMenu(
             model_row,
             self.yolo_model_preset,
-            DEFAULT_YOLO_MODEL,
-            QUADRO_YOLO_MODEL,
+            *MODEL_PRESETS.keys(),
             command=self.on_model_preset_changed,
         )
         self.model_menu.grid(row=0, column=1, padx=6, sticky="w")
@@ -531,20 +534,21 @@ class App:
     # ===== Vision =====
     def on_model_preset_changed(self, preset):
         preset = str(preset).strip()
-        if preset:
-            self.yolo_model_path.set(preset)
+        model_path = MODEL_PRESETS.get(preset, preset)
+        if model_path:
+            self.yolo_model_path.set(model_path)
         self.update_yolo_model_config()
 
     def update_yolo_model_config(self):
-        model_path = self.yolo_model_path.get().strip()
-        if model_path.endswith("quadron_1280.onnx"):
+        model_path = self.yolo_model_path.get().strip().lower()
+        if model_path.endswith(".onnx"):
             self.yolo_predict_imgsz = QUADRO_YOLO_IMGSZ
         else:
             self.yolo_predict_imgsz = 640
 
     def get_yolo_predict_classes(self):
-        model_path = self.yolo_model_path.get().strip()
-        if model_path.endswith("quadron_1280.onnx"):
+        model_path = self.yolo_model_path.get().strip().lower()
+        if model_path.endswith(".onnx"):
             return None
         return [67]
 
@@ -577,8 +581,10 @@ class App:
         if model_path is None:
             msg = (
                 "Local model file not found.\n\n"
-                "Place weights on Jetson (for example tools/models/yolo11n.pt)\n"
-                "and set Model path to that file."
+                "Place weights next to this script, for example:\n"
+                "  tools/yolo11n.pt\n"
+                "  tools/quadron_1280.onnx\n\n"
+                "Then select a preset or set Model path to that file."
             )
             self.yolo_model = None
             self.log(f"[YOLO] Model not found locally: {model_path_raw}")
