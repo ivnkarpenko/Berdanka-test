@@ -76,7 +76,10 @@ class App:
         self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
         self.yolo_model_preset = tk.StringVar(value="YOLO11n (.pt)")
         self.yolo_conf = tk.DoubleVar(value=0.10)
+        self.yolo_imgsz = tk.IntVar(value=640)
         self.yolo_predict_imgsz = 640
+        self.yolo_status = "YOLO: idle"
+        self.last_yolo_log_ts = 0.0
         self.last_frame = None
         self.last_det = None
         self.last_det_center = None
@@ -235,6 +238,10 @@ class App:
         tk.Label(fov_row, text="Conf:").pack(side="left")
         self.ed_yolo_conf = tk.Entry(fov_row, width=5, textvariable=self.yolo_conf)
         self.ed_yolo_conf.pack(side="left", padx=6)
+
+        tk.Label(fov_row, text="ImgSz:").pack(side="left")
+        self.ed_yolo_imgsz = tk.Entry(fov_row, width=5, textvariable=self.yolo_imgsz)
+        self.ed_yolo_imgsz.pack(side="left", padx=6)
 
         tk.Label(fov_row, text="HFOV°:").pack(side="left")
         self.ed_hfov = tk.Entry(fov_row, width=6, textvariable=self.hfov)
@@ -547,11 +554,11 @@ class App:
         self.update_yolo_model_config()
 
     def update_yolo_model_config(self):
-        model_path = self.yolo_model_path.get().strip().lower()
-        if model_path.endswith(".onnx"):
-            self.yolo_predict_imgsz = QUADRO_YOLO_IMGSZ
-        else:
-            self.yolo_predict_imgsz = 640
+        try:
+            imgsz = int(self.yolo_imgsz.get())
+        except Exception:
+            imgsz = 640
+        self.yolo_predict_imgsz = max(320, min(1280, imgsz))
 
     def get_yolo_predict_classes(self):
         model_path = self.yolo_model_path.get().strip().lower()
@@ -670,6 +677,7 @@ class App:
             if len(results) == 0:
                 self.last_det = None
                 self.last_det_center = None
+                self.yolo_status = "YOLO: no result"
                 if single:
                     self.log("[YOLO] Detect: no result objects returned.")
                 return frame
@@ -687,6 +695,9 @@ class App:
 
             if single:
                 self.log(f"[YOLO] Detect: boxes={box_count}, best_conf={best_conf:.3f}")
+            elif time.time() - self.last_yolo_log_ts >= 2.0:
+                self.log(f"[YOLO] Detect: boxes={box_count}, best_conf={best_conf:.3f}")
+                self.last_yolo_log_ts = time.time()
 
             if best is not None:
                 x1, y1, x2, y2 = map(int, best.xyxy[0].tolist())
@@ -694,20 +705,32 @@ class App:
                 cy = int((y1 + y2) / 2)
                 self.last_det = (x1, y1, x2, y2, best_conf)
                 self.last_det_center = (cx, cy)
+                self.yolo_status = f"YOLO boxes={box_count} conf={best_conf:.2f} center={cx},{cy}"
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+                cv2.rectangle(frame, (8, 8), (min(frame.shape[1] - 1, 390), 42), (0, 0, 0), -1)
+                cv2.putText(
+                    frame,
+                    self.yolo_status,
+                    (14, 33),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                )
                 cv2.putText(
                     frame,
                     f"target {best_conf:.2f}",
-                    (x1, max(0, y1 - 6)),
+                    (max(0, x1), max(24, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2,
+                    0.75,
+                    (255, 255, 255),
+                    3,
                 )
             else:
                 self.last_det = None
                 self.last_det_center = None
+                self.yolo_status = f"YOLO boxes=0 conf={best_conf:.2f}"
                 if single:
                     self.log("[YOLO] Detect: no boxes after postprocess.")
             return frame
