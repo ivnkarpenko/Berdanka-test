@@ -35,3 +35,9 @@ If DeepStream is installed in a non-default directory, pass it to make:
 ```bash
 make DEEPSTREAM_DIR=/opt/nvidia/deepstream/deepstream-6.1
 ```
+
+To find the correct include path on Jetson:
+
+```bash
+sudo find /opt/nvidia -name nvdsinfer_custom_impl.h
+```
