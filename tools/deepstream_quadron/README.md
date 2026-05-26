@@ -9,6 +9,13 @@ cd ~/ivank/Berdanka-test/tools/deepstream_quadron
 make
 ```
 
+If the build cannot find `cuda_runtime_api.h`, ensure that the CUDA
+development package is installed, or pass the CUDA Toolkit location:
+
+```bash
+make CUDA_DIR=/usr/local/cuda-11.4
+```
+
 If `deepstream-app` fails to load `libgstrtspserver-1.0.so.0`, install
 the missing GStreamer RTSP runtime package:
 
