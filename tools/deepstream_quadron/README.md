@@ -9,6 +9,13 @@ cd ~/ivank/Berdanka-test/tools/deepstream_quadron
 make
 ```
 
+If `deepstream-app` fails to load `libgstrtspserver-1.0.so.0`, install
+the missing GStreamer RTSP runtime package:
+
+```bash
+sudo apt install libgstrtspserver-1.0-0
+```
+
 Run a camera smoke test:
 
 ```bash

@@ -13,7 +13,7 @@ CXXFLAGS += -std=c++14 -Wall -Wextra -O2 -fPIC
 CXXFLAGS += -I$(DEEPSTREAM_DIR)/sources/includes
 LDFLAGS += -shared
 
-.PHONY: all clean
+.PHONY: all clean check-deepstream
 
 all: $(TARGET)
 
@@ -22,7 +22,7 @@ check-deepstream:
 	@test -f "$(DEEPSTREAM_DIR)/sources/includes/nvdsinfer_custom_impl.h" || (echo "Missing $(DEEPSTREAM_DIR)/sources/includes/nvdsinfer_custom_impl.h"; exit 1)
 
 $(TARGET): check-deepstream $(SRC)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(SRC)
 
 clean:
 	rm -f $(TARGET)
