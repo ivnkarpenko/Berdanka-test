@@ -47,6 +47,7 @@ class ArduinoTcpClient:
         self._lock = threading.Lock()
         self._telemetry = Telemetry()
         self._logs: queue.Queue[str] = queue.Queue(maxsize=300)
+        self._last_ping_s = 0.0
 
     def connect(self, host: str, port: int) -> str:
         self.disconnect()
@@ -70,6 +71,7 @@ class ArduinoTcpClient:
         self.send_line("CFG:TELEMETRY:1")
         self.send_line("MSGONLY:CONNECTED")
         self.send_line("PING")
+        self._last_ping_s = time.time()
         self._log(f"Connected to {host}:{port}")
         return "CONNECTED"
 
@@ -89,7 +91,7 @@ class ArduinoTcpClient:
             except Exception:
                 pass
 
-    def send_line(self, line: str) -> bool:
+    def send_line(self, line: str, log_tx: bool = True) -> bool:
         if not line.endswith("\n"):
             line += "\n"
         with self._lock:
@@ -99,7 +101,8 @@ class ArduinoTcpClient:
             return False
         try:
             sock.sendall(line.encode("utf-8"))
-            self._log(f"TX {line.strip()}")
+            if log_tx:
+                self._log(f"TX {line.strip()}")
             return True
         except Exception as exc:
             self._log(f"TX ERROR: {exc}")
@@ -109,6 +112,14 @@ class ArduinoTcpClient:
     def snapshot(self) -> Telemetry:
         with self._lock:
             return Telemetry(**self._telemetry.__dict__)
+
+    def heartbeat(self) -> None:
+        with self._lock:
+            connected = self._sock is not None
+        now = time.time()
+        if connected and now - self._last_ping_s >= 1.0:
+            if self.send_line("PING", log_tx=False):
+                self._last_ping_s = now
 
     def logs(self, limit: int = 80) -> list[str]:
         items = list(self._logs.queue)
@@ -233,7 +244,7 @@ def screen_projection(
 
 
 client = ArduinoTcpClient()
-app = Dash(__name__)
+app = Dash(__name__, update_title=None)
 
 
 def number_input(id_: str, value: float, step: float = 1.0, min_: float | None = None, max_: float | None = None) -> dcc.Input:
@@ -471,6 +482,7 @@ def refresh(
     fov_x: float,
     fov_y: float,
 ) -> tuple[list[html.Div], str, str]:
+    client.heartbeat()
     telemetry = client.snapshot()
     range_m = float(target_range or DEFAULT_TARGET_RANGE_M)
     az = float(target_az or 0)

@@ -2,7 +2,6 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <math.h>
-#include <EEPROM.h>
 #include <Adafruit_GFX.h>
 #include <ILI9488.h>
 #include "ICM_20948.h"
@@ -110,16 +109,6 @@ bool     tcpTelemetryEnabled = false;
 int16_t spawnPitchQ = 0;
 int16_t spawnYawQ   = 0;
 bool    spawnSet    = false;
-
-struct PersistedTarget {
-  uint32_t magic;
-  int16_t pitchQ;
-  int16_t yawQ;
-  char msg[31];
-};
-
-constexpr uint32_t TARGET_MAGIC = 0x42524441UL; // "BRDA"
-constexpr int EEPROM_TARGET_ADDR = 0;
 
 // ================== IMU ==================
 ICM_20948_I2C imu;
@@ -257,37 +246,6 @@ void drawStringIfChanged(int16_t x, int16_t y, const char* s, char* last, size_t
   last[lastSz - 1] = '\0';
 }
 
-void saveTargetToEEPROM(const char* msg) {
-  PersistedTarget target{};
-  target.magic = TARGET_MAGIC;
-  target.pitchQ = spawnPitchQ;
-  target.yawQ = spawnYawQ;
-
-  strncpy(target.msg, msg, sizeof(target.msg) - 1);
-  target.msg[sizeof(target.msg) - 1] = '\0';
-
-  EEPROM.put(EEPROM_TARGET_ADDR, target);
-}
-
-void clearTargetInEEPROM() {
-  PersistedTarget target{};
-  EEPROM.put(EEPROM_TARGET_ADDR, target);
-}
-
-bool loadTargetFromEEPROM() {
-  PersistedTarget target{};
-  EEPROM.get(EEPROM_TARGET_ADDR, target);
-
-  if (target.magic != TARGET_MAGIC) return false;
-
-  spawnPitchQ = quantizeDeg2((float)target.pitchQ);
-  spawnYawQ = wrapAngle180i(target.yawQ);
-  spawnSet = true;
-
-  drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, target.msg, lastMsg, sizeof(lastMsg), 30);
-  return true;
-}
-
 void drawStatusLineIfChanged(int16_t x, int16_t y, const char* s,
                              uint16_t color, char* last, size_t lastSz,
                              uint16_t &lastColor, int padWidth) {
@@ -398,7 +356,6 @@ void applyZeroCalibration(float roll, float pitch, float yaw, uint32_t nowMs) {
   spawnPitchQ = 0;
   spawnYawQ = 0;
   spawnSet = false;
-  clearTargetInEEPROM();
   drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, "-", lastMsg, sizeof(lastMsg), 30);
 
   lastYaw = 0.0f;
@@ -864,15 +821,7 @@ void setup() {
   drawCrossFull();
   drawStaticTextLabels();
   drawTCPStatus(false);
-
-  if (loadTargetFromEEPROM()) {
-    Serial.print("Target restored: pitch=");
-    Serial.print(spawnPitchQ);
-    Serial.print(" yaw=");
-    Serial.println(spawnYawQ);
-  } else {
-    Serial.println("No saved target in EEPROM.");
-  }
+  Serial.println("Target persistence disabled.");
 
   Wire.begin();
   Wire.setClock(400000);
@@ -1089,7 +1038,6 @@ void loop() {
         spawnSet    = true;
 
         drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, "CENTER", lastMsg, sizeof(lastMsg), 30);
-        saveTargetToEEPROM("CENTER");
         Serial.print("Center command applied: pitch=");
         Serial.print(spawnPitchQ);
         Serial.print(" yaw=");
@@ -1114,8 +1062,7 @@ void loop() {
           msg.toCharArray(msgBuf, sizeof(msgBuf));
           msgBuf[30] = '\0';
           drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
-          saveTargetToEEPROM(msgBuf);
-          Serial.println("Target saved to EEPROM.");
+          Serial.println("Target updated.");
 
           // ACK can be disabled to reduce Wi-Fi blocking latency.
           if (ENABLE_PACKET_ACK) {

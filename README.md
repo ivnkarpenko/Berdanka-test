@@ -14,6 +14,7 @@
 3. Прошивка читает ориентацию устройства из IMU.
 4. TFT показывает маркер цели относительно текущего yaw/pitch устройства.
 5. Jetson control panel может включить телеметрию и получать ориентацию по Wi-Fi.
+6. Цель не сохраняется в EEPROM: после перезагрузки Arduino стартует без сохраненной цели.
 
 UWB, DeepStream и TensorRT engine в текущей версии не используются.
 Предполагаемая дальность цели для контрольной визуализации по умолчанию: `300 м`.
@@ -87,6 +88,9 @@ MSGONLY:<text>
 ```text
 TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>
 ```
+
+Jetson control panel отправляет тихий `PING` примерно раз в секунду, чтобы Arduino
+не закрывала TCP по heartbeat timeout.
 
 ## Сборка
 
