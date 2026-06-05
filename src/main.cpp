@@ -507,6 +507,15 @@ static bool isPingCommand(const String& s) {
   return s == "PING";
 }
 
+static bool parseMsgOnlyCommand(const String& s, String& msg) {
+  const String prefix = "MSGONLY:";
+  if (!s.startsWith(prefix)) return false;
+
+  msg = s.substring(prefix.length());
+  msg.trim();
+  return msg.length() > 0;
+}
+
 static bool parsePositiveFloatTail(String tail, float& value) {
   tail.trim();
   if (tail.length() == 0) return false;
@@ -981,12 +990,25 @@ void loop() {
       uint32_t newTcpPollMs = 0;
       int16_t newBoxSizePx = 0;
       uint32_t newBoxRefreshMs = 0;
+      String msgOnly;
       bool newBoxRenderEnabled = false;
       bool newBoxDeltaRenderEnabled = false;
       bool newTelemetryEnabled = false;
 
       if (isPingCommand(line)) {
         lastTcpAliveMs = nowMs;
+      } else if (parseMsgOnlyCommand(line, msgOnly)) {
+        lastTcpAliveMs = nowMs;
+        char msgBuf[48];
+        msgOnly.toCharArray(msgBuf, sizeof(msgBuf));
+        msgBuf[30] = '\0';
+        drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
+        Serial.print("Msg updated: ");
+        Serial.println(msgBuf);
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;MSGONLY:");
+          client.println(msgBuf);
+        }
       } else if (parseDisplayFovXCommand(line, newFovXDeg)) {
         lastTcpAliveMs = nowMs;
         displayFovXDeg = newFovXDeg;

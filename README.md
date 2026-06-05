@@ -13,7 +13,7 @@
 2. Клиент отправляет целеуказание: угол места и азимут цели.
 3. Прошивка читает ориентацию устройства из IMU.
 4. TFT показывает маркер цели относительно текущего yaw/pitch устройства.
-5. Jetson-визуализатор может включить телеметрию и получать ориентацию по Wi-Fi.
+5. Jetson control panel может включить телеметрию и получать ориентацию по Wi-Fi.
 
 UWB, DeepStream и TensorRT engine в текущей версии не используются.
 Предполагаемая дальность цели для контрольной визуализации по умолчанию: `300 м`.
@@ -43,10 +43,10 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 - `lib/ILI9488/` - локальная библиотека дисплея.
 - `tools/windows_tcp_gui.py` - TCP GUI для Windows.
 - `tools/jetson_tcp_gui.py` - TCP GUI для Linux/Jetson без DeepStream.
-- `tools/jetson_wifi_visualize.py` - контрольная Jetson Linux 3D-визуализация с Wi-Fi телеметрией Arduino.
+- `tools/jetson_wifi_visualize.py` - легкая Jetson Linux control panel без графиков: цель, настройки и Wi-Fi телеметрия Arduino.
 - `tools/yolo11n.pt` - опциональная локальная YOLO-модель для GUI.
 - `tools/quadron_1280.onnx` - опциональная ONNX-модель для GUI.
-- `requirements-jetson-viz.txt` - зависимости для 3D-визуализатора.
+- `requirements-jetson-viz.txt` - зависимости для Jetson control panel.
 - `task.md` - ТЗ, протокол, ограничения и будущие этапы.
 
 ## TCP протокол
@@ -76,6 +76,7 @@ CFG:BOX_REFRESH_MS:<ms>
 CFG:BOX_RENDER:<0|1>
 CFG:BOX_DELTA_RENDER:<0|1>
 CFG:TELEMETRY:<0|1>
+MSGONLY:<text>
 ```
 
 Старый `CFG:DEG_PER_PX:<value>` оставлен только для совместимости и внутри
@@ -111,7 +112,7 @@ Linux/Jetson:
 python3 tools/jetson_tcp_gui.py
 ```
 
-Jetson 3D Wi-Fi визуализатор:
+Jetson Wi-Fi control panel:
 
 ```bash
 pip install -r requirements-jetson-viz.txt

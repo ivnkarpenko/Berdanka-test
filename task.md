@@ -38,7 +38,7 @@ TFT_LED = A0
 - Есть throttling TCP, HUD и рендера маркера для снижения лагов.
 - Настройки экрана и рендера можно менять TCP-командами.
 - По команде `CFG:TELEMETRY:1` Arduino отдает текущие углы и состояние цели по Wi-Fi.
-- Добавлена контрольная Jetson Linux 3D-программа с целью, координатами цели и приемом Wi-Fi телеметрии.
+- Добавлена легкая Jetson Linux control panel для задания цели, настроек и приема Wi-Fi телеметрии.
 
 ## 4. Что сознательно не используется
 
@@ -84,7 +84,7 @@ range_m
 
 В текущей прошивке `range_m` не используется, потому что без UWB и без знания
 позиции переносимого устройства дальность не меняет направление на экране.
-В контрольной Jetson-визуализации предполагаемая дальность цели по умолчанию
+В Jetson control panel предполагаемая дальность цели по умолчанию
 задана `300 м`.
 
 Главное правило, перенесенное из `berdanka-vizualize`: экран показывает не
@@ -173,9 +173,12 @@ CFG:BOX_REFRESH_MS:<ms>
 CFG:BOX_RENDER:<0|1>
 CFG:BOX_DELTA_RENDER:<0|1>
 CFG:TELEMETRY:<0|1>
+MSGONLY:<text>
 ```
 
 `CMD:CENTER` записывает текущие `pitch/yaw` как целевые углы и центрирует маркер.
+
+`MSGONLY:<text>` обновляет строку `Msg` на Arduino без изменения углов цели.
 
 `CFG:DEG_PER_PX:<value>` оставлен только как legacy-команда. Прошивка переводит
 ее в:
@@ -188,7 +191,7 @@ FOV_Y = value * SCREEN_H
 ### Телеметрия от Arduino
 
 По умолчанию телеметрия выключена, чтобы старые GUI не заполняли лог. Новая
-Jetson 3D-программа включает ее после подключения:
+Jetson control panel включает ее после подключения:
 
 ```text
 CFG:TELEMETRY:1
@@ -200,8 +203,8 @@ CFG:TELEMETRY:1
 TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>
 ```
 
-Эта строка нужна для контрольной визуализации: Jetson получает ориентацию
-устройства по Wi-Fi и отображает ее в 3D-сцене.
+Эта строка нужна для контрольной панели: Jetson получает ориентацию устройства
+по Wi-Fi и показывает ее в таблице текущих значений.
 
 ## 8. Репозиторий после чистки
 
@@ -212,9 +215,9 @@ TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_R
 - `lib/ILI9488/` - локальная библиотека дисплея;
 - `tools/windows_tcp_gui.py` - Windows GUI;
 - `tools/jetson_tcp_gui.py` - Linux/Jetson GUI;
-- `tools/jetson_wifi_visualize.py` - Jetson Linux 3D-визуализация с Wi-Fi телеметрией Arduino;
+- `tools/jetson_wifi_visualize.py` - Jetson Linux control panel без графиков, с Wi-Fi телеметрией Arduino;
 - `tools/yolo11n.pt` и `tools/quadron_1280.onnx` - опциональные модели для GUI;
-- `requirements-jetson-viz.txt` - зависимости Jetson 3D-визуализатора;
+- `requirements-jetson-viz.txt` - зависимости Jetson control panel;
 - `README.md` и `task.md`.
 
 Удалено:
@@ -266,7 +269,7 @@ Linux/Jetson GUI:
 python3 tools/jetson_tcp_gui.py
 ```
 
-Jetson 3D Wi-Fi визуализатор:
+Jetson Wi-Fi control panel:
 
 ```bash
 pip install -r requirements-jetson-viz.txt
@@ -284,11 +287,11 @@ http://127.0.0.1:8050
 - подключение к Arduino TCP `192.168.4.1:3333`;
 - включение Wi-Fi телеметрии `CFG:TELEMETRY:1`;
 - задание цели углами `azimuth/elevation/range`;
-- задание цели координатами `X/Y/Z`;
-- перемещение цели с живым обновлением 3D-сцены;
+- расчет контрольных координат цели `X/Y/Z`;
 - отправка текущей цели на Arduino в формате `MSG:JETSON;X:<elevation>;Y:<azimuth>`;
-- отображение статического источника, устройства, цели, луча на цель и направления устройства;
-- отображение виртуального экрана устройства с той же yaw-конвенцией, что в прошивке.
+- отправка `MSGONLY:<text>` на Arduino без изменения цели;
+- изменение FOV, размера квадрата, частот TCP/отрисовки и флагов рендера;
+- отображение текущей Wi-Fi телеметрии без Plotly-графиков.
 
 ## 10. Требования к поведению
 
@@ -301,7 +304,7 @@ http://127.0.0.1:8050
 - Цель выше текущего pitch должна двигать маркер вверх.
 - Изменение `FOV_X/FOV_Y` должно менять масштаб маркера без перепрошивки.
 - Маркер должен оставаться частично видимым у края экрана.
-- Jetson-визуализатор должен иметь предполагаемую дальность цели `300 м` по умолчанию.
+- Jetson control panel должен иметь предполагаемую дальность цели `300 м` по умолчанию.
 
 ## 11. Будущие задачи
 
