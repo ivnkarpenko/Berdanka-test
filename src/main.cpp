@@ -37,7 +37,8 @@ constexpr int16_t CY = SCREEN_H / 2;
 ILI9488 tft(TFT_CS, TFT_DC, TFT_RST);
 
 // ================== UI ==================
-constexpr float   DEFAULT_DEG_PER_PX = 1.0f / 3.0f;
+constexpr float   DEFAULT_FOV_X_DEG = 60.0f;
+constexpr float   DEFAULT_FOV_Y_DEG = 80.0f;
 constexpr int16_t DEFAULT_BOX_SIZE   = 50;
 constexpr int16_t ANGLE_STEP_DEG = 2;
 constexpr int16_t TARGET_TOL_DEG = 6;
@@ -60,6 +61,7 @@ constexpr int16_t STATUS_Y_TCP  = 136;
 // HUD auto refresh
 constexpr uint32_t HUD_REFRESH_MS = 10000;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
+constexpr uint32_t TCP_TELEMETRY_MS = 250;
 constexpr uint32_t DEFAULT_TCP_POLL_MS = 80;
 constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 2500;
 constexpr uint32_t DEFAULT_BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
@@ -82,6 +84,7 @@ char lastIP[20]  = "0.0.0.0";
 uint32_t lastHudRefreshMs = 0;
 uint32_t lastTcpStatusDrawMs = 0;
 uint32_t lastTcpPollMs = 0;
+uint32_t lastTcpTelemetryMs = 0;
 uint32_t lastBoxDrawMs = 0;
 uint32_t lastSerialDebugMs = 0;
 uint32_t lastLoopTickMs = 0;
@@ -93,15 +96,17 @@ char lastImuStatusLine[40] = "";
 char lastTcpStatusLine[40] = "";
 uint16_t lastImuStatusColor = 0xFFFF;
 uint16_t lastTcpStatusColor = 0xFFFF;
-float    displayDegPerPx = DEFAULT_DEG_PER_PX;
+float    displayFovXDeg = DEFAULT_FOV_X_DEG;
+float    displayFovYDeg = DEFAULT_FOV_Y_DEG;
 uint32_t tcpPollIntervalMs = DEFAULT_TCP_POLL_MS;
 int16_t  boxSizePx = DEFAULT_BOX_SIZE;
 uint32_t boxRefreshIntervalMs = DEFAULT_BOX_REFRESH_MS;
 int16_t  edgeVisiblePx = DEFAULT_EDGE_VISIBLE_PX;
 bool     boxRenderEnabled = true;
 bool     boxDeltaRenderEnabled = true;
+bool     tcpTelemetryEnabled = false;
 
-// ================== SPAWN (from Laptop) ==================
+// ================== TARGET (from TCP client) ==================
 int16_t spawnPitchQ = 0;
 int16_t spawnYawQ   = 0;
 bool    spawnSet    = false;
@@ -502,21 +507,63 @@ static bool isPingCommand(const String& s) {
   return s == "PING";
 }
 
+static bool parsePositiveFloatTail(String tail, float& value) {
+  tail.trim();
+  if (tail.length() == 0) return false;
+
+  bool hasDigit = false;
+  bool hasDot = false;
+  for (size_t i = 0; i < tail.length(); i++) {
+    char c = tail[i];
+    if (isDigit(c)) {
+      hasDigit = true;
+      continue;
+    }
+    if (c == '.' && !hasDot) {
+      hasDot = true;
+      continue;
+    }
+    return false;
+  }
+
+  if (!hasDigit) return false;
+  value = tail.toFloat();
+  return value > 0.0f;
+}
+
+static bool parseDisplayFovXCommand(const String& s, float& fovXDeg) {
+  const String prefix = "CFG:FOV_X:";
+  if (!s.startsWith(prefix)) return false;
+
+  float value = 0.0f;
+  if (!parsePositiveFloatTail(s.substring(prefix.length()), value)) return false;
+  if (value < 5.0f || value > 180.0f) return false;
+
+  fovXDeg = value;
+  return true;
+}
+
+static bool parseDisplayFovYCommand(const String& s, float& fovYDeg) {
+  const String prefix = "CFG:FOV_Y:";
+  if (!s.startsWith(prefix)) return false;
+
+  float value = 0.0f;
+  if (!parsePositiveFloatTail(s.substring(prefix.length()), value)) return false;
+  if (value < 5.0f || value > 180.0f) return false;
+
+  fovYDeg = value;
+  return true;
+}
+
 static bool parseDisplayDegPerPxCommand(const String& s, float& degPerPx) {
   const String prefix = "CFG:DEG_PER_PX:";
   if (!s.startsWith(prefix)) return false;
 
-  String tail = s.substring(prefix.length());
-  tail.trim();
-  if (tail.length() == 0) return false;
+  float value = 0.0f;
+  if (!parsePositiveFloatTail(s.substring(prefix.length()), value)) return false;
 
-  for (size_t i = 0; i < tail.length(); i++) {
-    char c = tail[i];
-    if (!(isDigit(c) || c == '-' || c == '+' || c == '.')) return false;
-  }
-
-  degPerPx = tail.toFloat();
-  return degPerPx > 0.0f;
+  degPerPx = value;
+  return true;
 }
 
 static bool parseTcpPollMsCommand(const String& s, uint32_t& tcpPollMs) {
@@ -591,6 +638,23 @@ static bool parseBoxRenderCommand(const String& s, bool& enabled) {
 
 static bool parseBoxDeltaRenderCommand(const String& s, bool& enabled) {
   const String prefix = "CFG:BOX_DELTA_RENDER:";
+  if (!s.startsWith(prefix)) return false;
+
+  String tail = s.substring(prefix.length());
+  tail.trim();
+  if (tail == "1") {
+    enabled = true;
+    return true;
+  }
+  if (tail == "0") {
+    enabled = false;
+    return true;
+  }
+  return false;
+}
+
+static bool parseTelemetryCommand(const String& s, bool& enabled) {
+  const String prefix = "CFG:TELEMETRY:";
   if (!s.startsWith(prefix)) return false;
 
   String tail = s.substring(prefix.length());
@@ -722,9 +786,13 @@ void drawNewBox(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color, bool
 }
 
 void updateBox(int16_t pitchRelQ, int16_t yawRelQ, bool onTarget, bool tcpConnected) {
-  float pxPerDeg = (displayDegPerPx > 0.0001f) ? (1.0f / displayDegPerPx) : (1.0f / DEFAULT_DEG_PER_PX);
-  int32_t centerX = (int32_t)lroundf((float)CX + (float)yawRelQ * pxPerDeg);
-  int32_t centerY = (int32_t)lroundf((float)CY + (float)pitchRelQ * pxPerDeg);
+  float fovX = (displayFovXDeg >= 5.0f) ? displayFovXDeg : DEFAULT_FOV_X_DEG;
+  float fovY = (displayFovYDeg >= 5.0f) ? displayFovYDeg : DEFAULT_FOV_Y_DEG;
+  float pxPerDegX = (float)SCREEN_W / fovX;
+  float pxPerDegY = (float)SCREEN_H / fovY;
+
+  int32_t centerX = (int32_t)lroundf((float)CX + (float)yawRelQ * pxPerDegX);
+  int32_t centerY = (int32_t)lroundf((float)CY - (float)pitchRelQ * pxPerDegY);
 
   int32_t boxX = centerX - boxSizePx / 2;
   int32_t boxY = centerY - boxSizePx / 2;
@@ -908,14 +976,37 @@ void loop() {
     line.trim();
     if (line.length() > 0) {
       float newDegPerPx = 0.0f;
+      float newFovXDeg = 0.0f;
+      float newFovYDeg = 0.0f;
       uint32_t newTcpPollMs = 0;
       int16_t newBoxSizePx = 0;
       uint32_t newBoxRefreshMs = 0;
       bool newBoxRenderEnabled = false;
       bool newBoxDeltaRenderEnabled = false;
+      bool newTelemetryEnabled = false;
 
       if (isPingCommand(line)) {
         lastTcpAliveMs = nowMs;
+      } else if (parseDisplayFovXCommand(line, newFovXDeg)) {
+        lastTcpAliveMs = nowMs;
+        displayFovXDeg = newFovXDeg;
+        eraseOldBox();
+        Serial.print("Display FOV X updated: ");
+        Serial.println(displayFovXDeg, 2);
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;CFG:FOV_X:");
+          client.println(displayFovXDeg, 2);
+        }
+      } else if (parseDisplayFovYCommand(line, newFovYDeg)) {
+        lastTcpAliveMs = nowMs;
+        displayFovYDeg = newFovYDeg;
+        eraseOldBox();
+        Serial.print("Display FOV Y updated: ");
+        Serial.println(displayFovYDeg, 2);
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;CFG:FOV_Y:");
+          client.println(displayFovYDeg, 2);
+        }
       } else if (parseTcpPollMsCommand(line, newTcpPollMs)) {
         lastTcpAliveMs = nowMs;
         tcpPollIntervalMs = newTcpPollMs;
@@ -947,14 +1038,27 @@ void loop() {
         boxDeltaRenderEnabled = newBoxDeltaRenderEnabled;
         Serial.print("Box delta render updated: ");
         Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
+      } else if (parseTelemetryCommand(line, newTelemetryEnabled)) {
+        lastTcpAliveMs = nowMs;
+        tcpTelemetryEnabled = newTelemetryEnabled;
+        Serial.print("TCP telemetry updated: ");
+        Serial.println(tcpTelemetryEnabled ? "ON" : "OFF");
+        if (ENABLE_PACKET_ACK) {
+          client.print("ACK;CFG:TELEMETRY:");
+          client.println(tcpTelemetryEnabled ? 1 : 0);
+        }
       } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
         lastTcpAliveMs = nowMs;
-        displayDegPerPx = newDegPerPx;
-        Serial.print("Display deg/px updated: ");
-        Serial.println(displayDegPerPx, 4);
+        displayFovXDeg = newDegPerPx * (float)SCREEN_W;
+        displayFovYDeg = newDegPerPx * (float)SCREEN_H;
+        eraseOldBox();
+        Serial.print("Legacy display deg/px converted to FOV X/Y: ");
+        Serial.print(displayFovXDeg, 2);
+        Serial.print("/");
+        Serial.println(displayFovYDeg, 2);
         if (ENABLE_PACKET_ACK) {
           client.print("ACK;CFG:DEG_PER_PX:");
-          client.println(displayDegPerPx, 4);
+          client.println(newDegPerPx, 4);
         }
       } else if (isCenterCommand(line)) {
         lastTcpAliveMs = nowMs;
@@ -978,7 +1082,7 @@ void loop() {
 
         if (parsePacket(line, msg, x, y)) {
           lastTcpAliveMs = nowMs;
-          // spawn (deg, step 2)
+          // target angles (deg, step 2)
           spawnPitchQ = quantizeDeg2((float)x);
           spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
           spawnSet    = true;
@@ -1021,11 +1125,37 @@ void loop() {
   }
 
   // ===== BOX draw =====
-  int16_t pitchRelQ = pQ - (spawnSet ? spawnPitchQ : 0);
-  int16_t yawRelQ   = deltaAngle180i(yQ, (spawnSet ? spawnYawQ : 0));
+  int16_t targetPitchQ = spawnSet ? spawnPitchQ : 0;
+  int16_t targetYawQ   = spawnSet ? spawnYawQ : 0;
+  int16_t pitchRelQ = targetPitchQ - pQ;
+  int16_t yawRelQ   = deltaAngle180i(yQ, targetYawQ);
 
   bool onTarget = (abs((int)pitchRelQ) <= TARGET_TOL_DEG) &&
                   (abs((int)yawRelQ)   <= TARGET_TOL_DEG);
+
+  if (tcpConnected && tcpTelemetryEnabled && (nowMs - lastTcpTelemetryMs >= TCP_TELEMETRY_MS)) {
+    client.print("TEL;ROLL:");
+    client.print(rQ);
+    client.print(";PITCH:");
+    client.print(pQ);
+    client.print(";YAW:");
+    client.print(yQ);
+    client.print(";TARGET_PITCH:");
+    client.print(targetPitchQ);
+    client.print(";TARGET_YAW:");
+    client.print(targetYawQ);
+    client.print(";PITCH_REL:");
+    client.print(pitchRelQ);
+    client.print(";YAW_REL:");
+    client.print(yawRelQ);
+    client.print(";FOV_X:");
+    client.print(displayFovXDeg, 2);
+    client.print(";FOV_Y:");
+    client.print(displayFovYDeg, 2);
+    client.print(";ON_TARGET:");
+    client.println(onTarget ? 1 : 0);
+    lastTcpTelemetryMs = nowMs;
+  }
 
   if (!boxRenderEnabled) {
     eraseOldBox();
@@ -1055,6 +1185,10 @@ void loop() {
     Serial.print(netPollUs);
     Serial.print(" tcp_poll_cfg_ms=");
     Serial.print(tcpPollIntervalMs);
+    Serial.print(" fov_x=");
+    Serial.print(displayFovXDeg, 1);
+    Serial.print(" fov_y=");
+    Serial.print(displayFovYDeg, 1);
     Serial.print(" tcp_read_us=");
     Serial.print(netReadUs);
     Serial.print(" box_us=");
@@ -1073,8 +1207,8 @@ void loop() {
     Serial.print(tcpConnected ? "OK" : "WAIT");
     Serial.print(" yaw=");
     Serial.print(yQ);
-    Serial.print(" spawnYaw=");
-    Serial.print(spawnYawQ);
+    Serial.print(" targetYaw=");
+    Serial.print(targetYawQ);
     Serial.print(" yawRel=");
     Serial.println(yawRelQ);
     lastSerialDebugMs = millis();

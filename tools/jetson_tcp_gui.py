@@ -71,7 +71,8 @@ class App:
         self.vfov = tk.DoubleVar(value=30.0)
         self.pitch_trim_deg = tk.DoubleVar(value=0.0)
         self.yaw_trim_deg = tk.DoubleVar(value=0.0)
-        self.display_deg_per_px = tk.DoubleVar(value=0.3333)
+        self.display_fov_x_deg = tk.DoubleVar(value=60.0)
+        self.display_fov_y_deg = tk.DoubleVar(value=80.0)
         self.tcp_poll_ms = tk.IntVar(value=250)
         self.box_size_px = tk.IntVar(value=50)
         self.box_refresh_ms = tk.IntVar(value=33)
@@ -167,12 +168,12 @@ class App:
 
         vcmd = (self.root.register(self.only_digits), "%P")
 
-        tk.Label(send, text="X:").grid(row=1, column=0, sticky="e")
+        tk.Label(send, text="Elev X:").grid(row=1, column=0, sticky="e")
         self.ed_x = tk.Entry(send, width=10, validate="key", validatecommand=vcmd)
         self.ed_x.insert(0, "0")
         self.ed_x.grid(row=1, column=1, padx=6, sticky="w")
 
-        tk.Label(send, text="Y:").grid(row=1, column=2, sticky="e")
+        tk.Label(send, text="Az Y:").grid(row=1, column=2, sticky="e")
         self.ed_y = tk.Entry(send, width=10, validate="key", validatecommand=vcmd)
         self.ed_y.insert(0, "0")
         self.ed_y.grid(row=1, column=3, padx=6, sticky="w")
@@ -282,9 +283,13 @@ class App:
         self.ed_yaw_trim = tk.Entry(map_row, width=6, textvariable=self.yaw_trim_deg)
         self.ed_yaw_trim.pack(side="left", padx=6)
 
-        tk.Label(map_row, text="Deg/Px:").pack(side="left")
-        self.ed_deg_per_px = tk.Entry(map_row, width=7, textvariable=self.display_deg_per_px)
-        self.ed_deg_per_px.pack(side="left", padx=6)
+        tk.Label(map_row, text="Screen FOV X°:").pack(side="left")
+        self.ed_display_fov_x = tk.Entry(map_row, width=6, textvariable=self.display_fov_x_deg)
+        self.ed_display_fov_x.pack(side="left", padx=6)
+
+        tk.Label(map_row, text="Y°:").pack(side="left")
+        self.ed_display_fov_y = tk.Entry(map_row, width=6, textvariable=self.display_fov_y_deg)
+        self.ed_display_fov_y.pack(side="left", padx=6)
 
         self.bt_apply_display = tk.Button(map_row, text="Apply Display", command=self.send_display_config)
         self.bt_apply_display.pack(side="left", padx=6)
@@ -457,16 +462,18 @@ class App:
 
     def send_display_config(self):
         try:
-            deg_per_px = float(self.display_deg_per_px.get())
+            fov_x = float(self.display_fov_x_deg.get())
+            fov_y = float(self.display_fov_y_deg.get())
         except Exception:
-            messagebox.showwarning("Display", "Deg/Px must be a number.")
+            messagebox.showwarning("Display", "Screen FOV values must be numbers.")
             return
 
-        if deg_per_px <= 0.0:
-            messagebox.showwarning("Display", "Deg/Px must be > 0.")
+        if fov_x < 5.0 or fov_x > 180.0 or fov_y < 5.0 or fov_y > 180.0:
+            messagebox.showwarning("Display", "Screen FOV must be between 5 and 180 degrees.")
             return
 
-        self.send_line(f"CFG:DEG_PER_PX:{deg_per_px:.4f}\n", warn_title="Display")
+        self.send_line(f"CFG:FOV_X:{fov_x:.2f}\n", warn_title="Display")
+        self.send_line(f"CFG:FOV_Y:{fov_y:.2f}\n", warn_title="Display")
 
     def send_net_config(self):
         try:

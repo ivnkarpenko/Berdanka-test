@@ -4,5 +4,11 @@
 .vscode/launch.json
 .vscode/ipch
 .venv
-tools/__pycache__
+__pycache__/
+tools/__pycache__/
 yolo_quadro_weights/
+runs/
+*.engine
+*.plan
+*.so
+tools/deepstream_quadron/
