@@ -42,48 +42,26 @@ constexpr int16_t DEFAULT_BOX_SIZE   = 50;
 constexpr int16_t ANGLE_STEP_DEG = 2;
 constexpr int16_t TARGET_TOL_DEG = 6;
 
-constexpr uint8_t TEXT_SIZE = 1;
 constexpr uint8_t STATUS_TEXT_SIZE = 2;
 
-// HUD positions
-constexpr int16_t TXT_X_LABEL = 10;
-constexpr int16_t TXT_X_VAL   = 80;
-constexpr int16_t TXT_Y_ROLL  = 10;
-constexpr int16_t TXT_Y_PITCH = 28;
-constexpr int16_t TXT_Y_YAW   = 46;
-constexpr int16_t TXT_Y_MSG   = 64;
-constexpr int16_t TXT_Y_IP    = 82;
+// Display status positions
 constexpr int16_t STATUS_X      = 10;
-constexpr int16_t STATUS_Y_IMU  = 110;
-constexpr int16_t STATUS_Y_TCP  = 136;
+constexpr int16_t STATUS_Y_IMU  = 10;
+constexpr int16_t STATUS_Y_TCP  = 36;
 
-// HUD auto refresh
-constexpr uint32_t HUD_REFRESH_MS = 5000;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
-constexpr uint32_t TCP_TELEMETRY_MS = 1000;
 constexpr uint32_t DEFAULT_TCP_POLL_MS = 80;
 constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 10000;
 constexpr uint32_t DEFAULT_BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
 constexpr bool ENABLE_PACKET_ACK = false;
-constexpr bool ENABLE_PERIODIC_HUD_REFRESH = true;
 
 // edge marker visible thickness (px)
 constexpr int16_t DEFAULT_EDGE_VISIBLE_PX = 5;
 
-// Values on screen
-int16_t lastDispRoll  = 32767;
-int16_t lastDispPitch = 32767;
-int16_t lastDispYaw   = 32767;
-
-char lastMsg[48] = "-";
-char lastIP[20]  = "0.0.0.0";
-
-uint32_t lastHudRefreshMs = 0;
 uint32_t lastTcpStatusDrawMs = 0;
 uint32_t lastTcpPollMs = 0;
-uint32_t lastTcpTelemetryMs = 0;
 uint32_t lastBoxDrawMs = 0;
 uint32_t lastSerialDebugMs = 0;
 uint32_t lastLoopTickMs = 0;
@@ -103,13 +81,6 @@ uint32_t boxRefreshIntervalMs = DEFAULT_BOX_REFRESH_MS;
 int16_t  edgeVisiblePx = DEFAULT_EDGE_VISIBLE_PX;
 bool     boxRenderEnabled = true;
 bool     boxDeltaRenderEnabled = true;
-bool     tcpTelemetryEnabled = false;
-uint32_t lastLoopUs = 0;
-uint32_t lastImuReadUs = 0;
-uint32_t lastNetPollUs = 0;
-uint32_t lastNetReadUs = 0;
-uint32_t lastBoxDrawUs = 0;
-uint32_t lastHudRefreshUs = 0;
 
 // ================== TARGET (from TCP client) ==================
 int16_t spawnPitchQ = 0;
@@ -186,7 +157,7 @@ static inline bool clipRect(int32_t x, int32_t y, int32_t w, int32_t h,
   return true;
 }
 
-// ================== Cross / HUD ==================
+// ================== Cross / status ==================
 void drawCrossFull() {
   tft.drawLine(CX, 0,      CX, SCREEN_H, ILI9488_DARKGREY);
   tft.drawLine(0,  CY, SCREEN_W, CY,     ILI9488_DARKGREY);
@@ -210,46 +181,6 @@ void drawCrossInRect(int16_t x, int16_t y, int16_t w, int16_t h) {
     if (x1 > SCREEN_W - 1) x1 = SCREEN_W - 1;
     tft.drawLine(x0, CY, x1, CY, ILI9488_DARKGREY);
   }
-}
-
-void drawStaticTextLabels() {
-  tft.setTextSize(TEXT_SIZE);
-  tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
-
-  tft.setCursor(TXT_X_LABEL, TXT_Y_ROLL);  tft.print(F("Roll ="));
-  tft.setCursor(TXT_X_LABEL, TXT_Y_PITCH); tft.print(F("Pitch ="));
-  tft.setCursor(TXT_X_LABEL, TXT_Y_YAW);   tft.print(F("Yaw ="));
-  tft.setCursor(TXT_X_LABEL, TXT_Y_MSG);   tft.print(F("Msg ="));
-  tft.setCursor(TXT_X_LABEL, TXT_Y_IP);    tft.print(F("IP ="));
-}
-
-void drawValueIfChanged(int16_t x, int16_t y, int16_t v, int16_t &lastV) {
-  if (v == lastV) return;
-
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%+5d", (int)v);
-
-  tft.setTextSize(TEXT_SIZE);
-  tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
-  tft.setCursor(x, y);
-  tft.print(buf);
-
-  lastV = v;
-}
-
-void drawStringIfChanged(int16_t x, int16_t y, const char* s, char* last, size_t lastSz, int padWidth) {
-  if (strncmp(s, last, lastSz) == 0) return;
-
-  char buf[80];
-  snprintf(buf, sizeof(buf), "%-*s", padWidth, s);
-
-  tft.setTextSize(TEXT_SIZE);
-  tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
-  tft.setCursor(x, y);
-  tft.print(buf);
-
-  strncpy(last, s, lastSz - 1);
-  last[lastSz - 1] = '\0';
 }
 
 void drawStatusLineIfChanged(int16_t x, int16_t y, const char* s,
@@ -290,52 +221,6 @@ void drawTCPStatus(bool tcpConnected) {
                           lastTcpStatusColor, 28);
 }
 
-// Force-refresh only the text/status HUD area. Do not clear the whole screen:
-// the target box renderer owns the moving graphics area.
-void refreshHUDForce(int16_t rollQ, int16_t pitchQ, int16_t yawQ) {
-  tft.fillRect(0, 0, 220, 155, ILI9488_BLACK);
-  drawStaticTextLabels();
-
-  char buf[16];
-  tft.setTextSize(TEXT_SIZE);
-  tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
-
-  snprintf(buf, sizeof(buf), "%+5d", (int)rollQ);
-  tft.setCursor(TXT_X_VAL, TXT_Y_ROLL);  tft.print(buf);
-
-  snprintf(buf, sizeof(buf), "%+5d", (int)pitchQ);
-  tft.setCursor(TXT_X_VAL, TXT_Y_PITCH); tft.print(buf);
-
-  snprintf(buf, sizeof(buf), "%+5d", (int)yawQ);
-  tft.setCursor(TXT_X_VAL, TXT_Y_YAW);   tft.print(buf);
-
-  char m[80];  snprintf(m, sizeof(m),  "%-30s", lastMsg);
-  tft.setCursor(TXT_X_VAL, TXT_Y_MSG); tft.print(m);
-
-  char ip[80]; snprintf(ip, sizeof(ip), "%-18s", lastIP);
-  tft.setCursor(TXT_X_VAL, TXT_Y_IP);  tft.print(ip);
-
-  // Force redraw status lines in case moving graphics overwrote them.
-  tft.setTextSize(STATUS_TEXT_SIZE);
-  tft.setTextColor(lastImuStatusColor, ILI9488_BLACK);
-  tft.setCursor(STATUS_X, STATUS_Y_IMU);
-  tft.print("                            ");
-  tft.setCursor(STATUS_X, STATUS_Y_IMU);
-  tft.print(lastImuStatusLine);
-
-  tft.setTextColor(lastTcpStatusColor, ILI9488_BLACK);
-  tft.setCursor(STATUS_X, STATUS_Y_TCP);
-  tft.print("                            ");
-  tft.setCursor(STATUS_X, STATUS_Y_TCP);
-  tft.print(lastTcpStatusLine);
-
-  lastDispRoll  = rollQ;
-  lastDispPitch = pitchQ;
-  lastDispYaw   = yawQ;
-
-  lastHudRefreshMs = millis();
-}
-
 // ================== IMU init/read ==================
 bool startIMU() {
   imu.begin(Wire, 0);
@@ -364,7 +249,6 @@ void applyZeroCalibration(float roll, float pitch, float yaw, uint32_t nowMs) {
   spawnPitchQ = 0;
   spawnYawQ = 0;
   spawnSet = false;
-  drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, "-", lastMsg, sizeof(lastMsg), 30);
 
   lastYaw = 0.0f;
   lastMove = nowMs;
@@ -627,23 +511,6 @@ static bool parseBoxDeltaRenderCommand(const String& s, bool& enabled) {
   return false;
 }
 
-static bool parseTelemetryCommand(const String& s, bool& enabled) {
-  const String prefix = "CFG:TELEMETRY:";
-  if (!s.startsWith(prefix)) return false;
-
-  String tail = s.substring(prefix.length());
-  tail.trim();
-  if (tail == "1") {
-    enabled = true;
-    return true;
-  }
-  if (tail == "0") {
-    enabled = false;
-    return true;
-  }
-  return false;
-}
-
 static bool parsePacket(const String& s, String& msg, float& x, float& y) {
   int iMsg = s.indexOf("MSG:");
   int iX   = s.indexOf(";X:");
@@ -683,9 +550,6 @@ void wifiConnectAndStartServer() {
   }
   Serial.println();
   Serial.println("AP started.");
-
-  IPAddress ip = WiFi.localIP();
-  snprintf(lastIP, sizeof(lastIP), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
 
   server.begin();
   Serial.print("TCP server started on port ");
@@ -827,7 +691,6 @@ void setup() {
 
   tft.fillScreen(ILI9488_BLACK);
   drawCrossFull();
-  drawStaticTextLabels();
   drawTCPStatus(false);
   Serial.println("Target persistence disabled.");
 
@@ -853,13 +716,6 @@ void setup() {
   wifiConnectAndStartServer();
   drawTCPStatus(false);
   Serial.println("TCP status: WAIT.");
-
-  tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
-  tft.setTextSize(TEXT_SIZE);
-  tft.setCursor(TXT_X_VAL, TXT_Y_IP);  tft.print(lastIP);
-  tft.setCursor(TXT_X_VAL, TXT_Y_MSG); tft.print(lastMsg);
-
-  lastHudRefreshMs = millis();
 }
 
 void loop() {
@@ -870,7 +726,6 @@ void loop() {
   uint32_t netPollUs = 0;
   uint32_t netReadUs = 0;
   uint32_t boxDrawUs = 0;
-  uint32_t hudRefreshUs = 0;
 
   float roll = 0, pitch = 0, yaw = 0;
   bool got = false;
@@ -900,14 +755,8 @@ void loop() {
   // swap roll/pitch
   float tmp = roll; roll = pitch; pitch = tmp;
 
-  int16_t rQ = quantizeDeg2(roll);
   int16_t pQ = quantizeDeg2(pitch);
   int16_t yQ = wrapAngle180i(quantizeDeg2(yaw));
-
-  // обновляем числа (быстро)
-  drawValueIfChanged(TXT_X_VAL, TXT_Y_ROLL,  rQ, lastDispRoll);
-  drawValueIfChanged(TXT_X_VAL, TXT_Y_PITCH, pQ, lastDispPitch);
-  drawValueIfChanged(TXT_X_VAL, TXT_Y_YAW,   yQ, lastDispYaw);
 
   // ===== NET accept =====
   if (nowMs - lastTcpPollMs >= tcpPollIntervalMs) {
@@ -950,7 +799,6 @@ void loop() {
       String msgOnly;
       bool newBoxRenderEnabled = false;
       bool newBoxDeltaRenderEnabled = false;
-      bool newTelemetryEnabled = false;
 
       if (isPingCommand(line)) {
         lastTcpAliveMs = nowMs;
@@ -959,7 +807,6 @@ void loop() {
         char msgBuf[48];
         msgOnly.toCharArray(msgBuf, sizeof(msgBuf));
         msgBuf[30] = '\0';
-        drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
         Serial.print("Msg updated: ");
         Serial.println(msgBuf);
         if (ENABLE_PACKET_ACK) {
@@ -1017,15 +864,6 @@ void loop() {
         boxDeltaRenderEnabled = newBoxDeltaRenderEnabled;
         Serial.print("Box delta render updated: ");
         Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
-      } else if (parseTelemetryCommand(line, newTelemetryEnabled)) {
-        lastTcpAliveMs = nowMs;
-        tcpTelemetryEnabled = newTelemetryEnabled;
-        Serial.print("TCP telemetry updated: ");
-        Serial.println(tcpTelemetryEnabled ? "ON" : "OFF");
-        if (ENABLE_PACKET_ACK) {
-          client.print("ACK;CFG:TELEMETRY:");
-          client.println(tcpTelemetryEnabled ? 1 : 0);
-        }
       } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
         lastTcpAliveMs = nowMs;
         displayFovXDeg = newDegPerPx * (float)SCREEN_W;
@@ -1045,7 +883,6 @@ void loop() {
         spawnYawQ   = yQ;
         spawnSet    = true;
 
-        drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, "CENTER", lastMsg, sizeof(lastMsg), 30);
         Serial.print("Center command applied: pitch=");
         Serial.print(spawnPitchQ);
         Serial.print(" yaw=");
@@ -1066,11 +903,9 @@ void loop() {
           spawnYawQ   = wrapAngle180i(yQ + quantizeDeg2((float)y));
           spawnSet    = true;
 
-          // Msg на HUD
           char msgBuf[48];
           msg.toCharArray(msgBuf, sizeof(msgBuf));
           msgBuf[30] = '\0';
-          drawStringIfChanged(TXT_X_VAL, TXT_Y_MSG, msgBuf, lastMsg, sizeof(lastMsg), 30);
           Serial.println("Target updated.");
 
           // ACK can be disabled to reduce Wi-Fi blocking latency.
@@ -1120,58 +955,8 @@ void loop() {
     boxDrawUs = micros() - boxDrawStartUs;
   }
 
-  // ===== HUD text refresh every 5s =====
-  if (ENABLE_PERIODIC_HUD_REFRESH && (millis() - lastHudRefreshMs >= HUD_REFRESH_MS)) {
-    uint32_t hudRefreshStartUs = micros();
-    refreshHUDForce(rQ, pQ, yQ);
-    hudRefreshUs = micros() - hudRefreshStartUs;
-  }
-
   uint32_t loopUs = micros() - loopStartUs;
-  lastLoopUs = loopUs;
-  lastImuReadUs = imuReadUs;
-  lastNetPollUs = netPollUs;
-  lastNetReadUs = netReadUs;
-  lastBoxDrawUs = boxDrawUs;
-  lastHudRefreshUs = hudRefreshUs;
 
-  if (tcpConnected && tcpTelemetryEnabled && (nowMs - lastTcpTelemetryMs >= TCP_TELEMETRY_MS)) {
-    client.print("TEL;ROLL:");
-    client.print(rQ);
-    client.print(";PITCH:");
-    client.print(pQ);
-    client.print(";YAW:");
-    client.print(yQ);
-    client.print(";TARGET_PITCH:");
-    client.print(targetPitchQ);
-    client.print(";TARGET_YAW:");
-    client.print(targetYawQ);
-    client.print(";PITCH_REL:");
-    client.print(pitchRelQ);
-    client.print(";YAW_REL:");
-    client.print(yawRelQ);
-    client.print(";FOV_X:");
-    client.print(displayFovXDeg, 2);
-    client.print(";FOV_Y:");
-    client.print(displayFovYDeg, 2);
-    client.print(";ON_TARGET:");
-    client.print(onTarget ? 1 : 0);
-    client.print(";LOOP_DT_MS:");
-    client.print(loopDtMs);
-    client.print(";LOOP_US:");
-    client.print(lastLoopUs);
-    client.print(";IMU_US:");
-    client.print(lastImuReadUs);
-    client.print(";TCP_POLL_US:");
-    client.print(lastNetPollUs);
-    client.print(";TCP_READ_US:");
-    client.print(lastNetReadUs);
-    client.print(";BOX_US:");
-    client.print(lastBoxDrawUs);
-    client.print(";HUD_US:");
-    client.println(lastHudRefreshUs);
-    lastTcpTelemetryMs = nowMs;
-  }
   if (ENABLE_SERIAL_DEBUG && (millis() - lastSerialDebugMs >= SERIAL_DEBUG_MS)) {
     Serial.print("DBG loop_dt_ms=");
     Serial.print(loopDtMs);
@@ -1199,8 +984,6 @@ void loop() {
     Serial.print(boxSizePx);
     Serial.print(" box_cfg_refresh_ms=");
     Serial.print(boxRefreshIntervalMs);
-    Serial.print(" hud_us=");
-    Serial.print(hudRefreshUs);
     Serial.print(" tcp=");
     Serial.print(tcpConnected ? "OK" : "WAIT");
     Serial.print(" yaw=");

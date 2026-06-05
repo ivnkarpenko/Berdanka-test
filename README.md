@@ -13,7 +13,7 @@
 2. Клиент отправляет целеуказание: угол места и азимут цели.
 3. Прошивка читает ориентацию устройства из IMU.
 4. TFT показывает маркер цели относительно текущего yaw/pitch устройства.
-5. Jetson control panel может включить телеметрию и получать ориентацию по Wi-Fi.
+5. Jetson control panel отправляет цель и настройки по Wi-Fi без обратной телеметрии.
 6. Цель не сохраняется в EEPROM: после перезагрузки Arduino стартует без сохраненной цели.
 
 UWB, DeepStream и TensorRT engine в текущей версии не используются.
@@ -39,12 +39,12 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 
 ## Структура
 
-- `src/main.cpp` - прошивка Arduino: IMU, Wi-Fi/TCP, парсинг команд, TFT HUD.
+- `src/main.cpp` - прошивка Arduino: IMU, Wi-Fi/TCP, парсинг команд, TFT-статусы и маркер цели.
 - `platformio.ini` - сборка PlatformIO для `uno_r4_wifi`.
 - `lib/ILI9488/` - локальная библиотека дисплея.
 - `tools/windows_tcp_gui.py` - TCP GUI для Windows.
 - `tools/jetson_tcp_gui.py` - TCP GUI для Linux/Jetson без DeepStream.
-- `tools/jetson_wifi_visualize.py` - легкая Jetson Linux control panel без графиков: цель, настройки и Wi-Fi телеметрия Arduino.
+- `tools/jetson_wifi_visualize.py` - легкая Jetson Linux control panel без графиков: цель, настройки и круговая проверка движения маркера.
 - `tools/yolo11n.pt` - опциональная локальная YOLO-модель для GUI.
 - `tools/quadron_1280.onnx` - опциональная ONNX-модель для GUI.
 - `requirements-jetson-viz.txt` - зависимости для Jetson control panel.
@@ -80,7 +80,6 @@ CFG:BOX_SIZE:<px>
 CFG:BOX_REFRESH_MS:<ms>
 CFG:BOX_RENDER:<0|1>
 CFG:BOX_DELTA_RENDER:<0|1>
-CFG:TELEMETRY:<0|1>
 MSGONLY:<text>
 ```
 
@@ -89,12 +88,6 @@ MSGONLY:<text>
 
 Старый `CFG:DEG_PER_PX:<value>` оставлен только для совместимости и внутри
 прошивки пересчитывается в `FOV_X/FOV_Y`.
-
-Если включена `CFG:TELEMETRY:1`, Arduino отправляет строки:
-
-```text
-TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>;LOOP_DT_MS:<ms>;LOOP_US:<us>;IMU_US:<us>;TCP_POLL_US:<us>;TCP_READ_US:<us>;BOX_US:<us>;HUD_US:<us>
-```
 
 Jetson control panel отправляет тихий `PING` примерно раз в секунду, чтобы Arduino
 не закрывала TCP по heartbeat timeout.
@@ -131,9 +124,8 @@ python3 tools/jetson_wifi_visualize.py
 ```
 
 Откройте `http://127.0.0.1:8050` на Jetson или `http://<jetson-ip>:8050` с другого устройства.
-После подключения панель пишет все строки `TEL` в `log.txt` в текущей папке.
-Для контрольной проверки положите устройство неподвижно, нажмите `Connect`,
-подождите несколько минут и пришлите этот файл.
+Для проверки отрисовки включите `Move target in circle`: Jetson будет отправлять
+цель по кругу через `MSG:<text>;X:<elevation>;Y:<azimuth>`.
 
 GUI умеют подключаться к AP Arduino, отправлять ручные углы, менять FOV экрана
 и опционально использовать камеру/YOLO для автопередачи смещения цели.

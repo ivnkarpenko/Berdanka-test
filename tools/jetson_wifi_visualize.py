@@ -5,8 +5,6 @@ import queue
 import socket
 import threading
 import time
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
@@ -21,31 +19,11 @@ DEFAULT_FOV_X_DEG = 60.0
 DEFAULT_FOV_Y_DEG = 80.0
 DEFAULT_BOX_SIZE_PX = 50
 DEFAULT_BOX_REFRESH_MS = 33
-LOG_PATH = Path("log.txt")
+CIRCLE_SEND_INTERVAL_S = 0.2
 
 
-@dataclass
-class Telemetry:
-    connected: bool = False
-    roll: float = 0.0
-    pitch: float = 0.0
-    yaw: float = 0.0
-    target_pitch: float = 0.0
-    target_yaw: float = 0.0
-    pitch_rel: float = 0.0
-    yaw_rel: float = 0.0
-    fov_x: float = DEFAULT_FOV_X_DEG
-    fov_y: float = DEFAULT_FOV_Y_DEG
-    on_target: bool = False
-    loop_dt_ms: float = 0.0
-    loop_us: float = 0.0
-    imu_us: float = 0.0
-    tcp_poll_us: float = 0.0
-    tcp_read_us: float = 0.0
-    box_us: float = 0.0
-    hud_us: float = 0.0
-    last_seen_s: float = 0.0
-    last_line: str = "-"
+circle_start_s = time.time()
+last_circle_send_s = 0.0
 
 
 class ArduinoTcpClient:
@@ -54,7 +32,6 @@ class ArduinoTcpClient:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._telemetry = Telemetry()
         self._logs: queue.Queue[str] = queue.Queue(maxsize=300)
         self._last_ping_s = 0.0
 
@@ -71,19 +48,15 @@ class ArduinoTcpClient:
 
         with self._lock:
             self._sock = sock
-            self._telemetry.connected = True
-            self._telemetry.last_seen_s = time.time()
 
         self._stop.clear()
         self._thread = threading.Thread(target=self._rx_loop, args=(sock,), daemon=True)
         self._thread.start()
 
-        self.send_line("CFG:TELEMETRY:1")
         self.send_line("MSGONLY:CONNECTED")
         self.send_line("PING")
         self._last_ping_s = time.time()
         self._log(f"Connected to {host}:{port}")
-        self._log_file_line(f"# connected {host}:{port}")
         return "CONNECTED"
 
     def disconnect(self) -> None:
@@ -92,7 +65,6 @@ class ArduinoTcpClient:
             sock = self._sock
             thread = self._thread
             self._sock = None
-            self._telemetry.connected = False
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -123,13 +95,12 @@ class ArduinoTcpClient:
             return True
         except Exception as exc:
             self._log(f"TX ERROR: {exc}")
-            self._log_file_line(f"# tx_error {exc}")
             self.disconnect()
             return False
 
-    def snapshot(self) -> Telemetry:
+    def is_connected(self) -> bool:
         with self._lock:
-            return Telemetry(**self._telemetry.__dict__)
+            return self._sock is not None
 
     def heartbeat(self) -> None:
         with self._lock:
@@ -155,14 +126,6 @@ class ArduinoTcpClient:
             except queue.Empty:
                 pass
 
-    def _log_file_line(self, message: str) -> None:
-        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with LOG_PATH.open("a", encoding="utf-8") as f:
-                f.write(f"{stamp} {message}\n")
-        except OSError as exc:
-            self._log(f"LOG FILE ERROR: {exc}")
-
     def _rx_loop(self, rx_sock: socket.socket) -> None:
         buffer = b""
         while not self._stop.is_set():
@@ -181,7 +144,6 @@ class ArduinoTcpClient:
                 continue
             except Exception as exc:
                 self._log(f"RX ERROR: {exc}")
-                self._log_file_line(f"# rx_error {exc}")
                 break
 
             while b"\n" in buffer:
@@ -194,60 +156,12 @@ class ArduinoTcpClient:
             is_current = self._sock is rx_sock
             if is_current:
                 self._sock = None
-                self._telemetry.connected = False
                 self._thread = None
         if is_current:
             self._log("Disconnected")
-            self._log_file_line("# disconnected")
 
     def _handle_line(self, line: str) -> None:
-        if line.startswith("TEL;"):
-            self._log_file_line(line)
-            parsed = parse_telemetry(line)
-            with self._lock:
-                current = self._telemetry
-                current.connected = True
-                current.last_seen_s = time.time()
-                current.last_line = line
-                for key, value in parsed.items():
-                    setattr(current, key, value)
-            return
         self._log(f"RX {line}")
-
-
-def parse_telemetry(line: str) -> dict[str, Any]:
-    aliases = {
-        "ROLL": "roll",
-        "PITCH": "pitch",
-        "YAW": "yaw",
-        "TARGET_PITCH": "target_pitch",
-        "TARGET_YAW": "target_yaw",
-        "PITCH_REL": "pitch_rel",
-        "YAW_REL": "yaw_rel",
-        "FOV_X": "fov_x",
-        "FOV_Y": "fov_y",
-        "ON_TARGET": "on_target",
-        "LOOP_DT_MS": "loop_dt_ms",
-        "LOOP_US": "loop_us",
-        "IMU_US": "imu_us",
-        "TCP_POLL_US": "tcp_poll_us",
-        "TCP_READ_US": "tcp_read_us",
-        "BOX_US": "box_us",
-        "HUD_US": "hud_us",
-    }
-    values: dict[str, Any] = {}
-    for part in line.split(";")[1:]:
-        if ":" not in part:
-            continue
-        key, raw = part.split(":", 1)
-        attr = aliases.get(key.strip().upper())
-        if attr is None:
-            continue
-        try:
-            values[attr] = raw.strip() == "1" if attr == "on_target" else float(raw)
-        except ValueError:
-            continue
-    return values
 
 
 def wrap180(angle: float) -> float:
@@ -318,7 +232,7 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H2("Target"),
-                        field("Msg on Arduino", dcc.Input(id="target-msg", value="JETSON", type="text", maxLength=30)),
+                        field("Message tag", dcc.Input(id="target-msg", value="JETSON", type="text", maxLength=30)),
                         field("Azimuth, deg", dcc.Slider(id="target-az", min=-180, max=180, step=1, value=0, marks={-180: "-180", 0: "0", 180: "180"})),
                         field("Elevation, deg", dcc.Slider(id="target-el", min=-90, max=90, step=1, value=0, marks={-90: "-90", 0: "0", 90: "90"})),
                         field("Assumed range, m (XYZ only)", dcc.Slider(id="target-range", min=50, max=1000, step=10, value=DEFAULT_TARGET_RANGE_M, marks={100: "100", 300: "300", 600: "600", 1000: "1000"})),
@@ -329,6 +243,19 @@ app.layout = html.Div(
                                 html.Button("Center Arduino", id="center"),
                             ],
                             className="button-row",
+                        ),
+                        dcc.Checklist(
+                            id="motion-flags",
+                            options=[{"label": "Move target in circle", "value": "circle"}],
+                            value=[],
+                            inline=True,
+                        ),
+                        html.Div(
+                            [
+                                field("Circle radius, deg", number_input("circle-radius", 20, 1, 1, 120)),
+                                field("Circle period, s", number_input("circle-period", 8, 0.5, 1, 120)),
+                            ],
+                            className="grid2",
                         ),
                     ],
                     className="panel",
@@ -358,9 +285,8 @@ app.layout = html.Div(
                             options=[
                                 {"label": "Draw box", "value": "box"},
                                 {"label": "Delta fill", "value": "delta"},
-                                {"label": "Telemetry (slower)", "value": "tel"},
                             ],
-                            value=["box", "delta", "tel"],
+                            value=["box", "delta"],
                             inline=True,
                         ),
                         html.Div(
@@ -378,12 +304,12 @@ app.layout = html.Div(
         ),
         html.Div(
             [
-                html.Div([html.H2("Current Values"), html.Div(id="metrics", className="metrics")], className="panel"),
+                html.Div([html.H2("Target Preview"), html.Div(id="metrics", className="metrics")], className="panel"),
                 html.Div([html.H2("Log"), html.Pre(id="log", className="log")], className="panel"),
             ],
             className="right",
         ),
-        dcc.Interval(id="tick", interval=1000, n_intervals=0),
+        dcc.Interval(id="tick", interval=200, n_intervals=0),
     ],
     className="app",
 )
@@ -475,7 +401,6 @@ def actions(
     if trigger == "connect":
         client.connect(str(ip or DEFAULT_ARDUINO_IP), int(port or DEFAULT_ARDUINO_PORT))
     elif trigger == "disconnect":
-        client.send_line("CFG:TELEMETRY:0")
         client.disconnect()
     elif trigger == "send-target":
         client.send_line(f"MSG:{msg};X:{float(target_el or 0):.2f};Y:{float(target_az or 0):.2f}")
@@ -492,7 +417,6 @@ def actions(
         client.send_line(f"CFG:TCP_POLL_MS:{int(tcp_poll or 80)}")
         client.send_line(f"CFG:BOX_RENDER:{1 if 'box' in flags else 0}")
         client.send_line(f"CFG:BOX_DELTA_RENDER:{1 if 'delta' in flags else 0}")
-        client.send_line(f"CFG:TELEMETRY:{1 if 'tel' in flags else 0}")
     else:
         return no_update
 
@@ -504,9 +428,13 @@ def actions(
     Output("connection-status", "children"),
     Output("log", "children"),
     Input("tick", "n_intervals"),
+    State("target-msg", "value"),
     State("target-az", "value"),
     State("target-el", "value"),
     State("target-range", "value"),
+    State("motion-flags", "value"),
+    State("circle-radius", "value"),
+    State("circle-period", "value"),
     State("screen-w", "value"),
     State("screen-h", "value"),
     State("fov-x", "value"),
@@ -514,19 +442,39 @@ def actions(
 )
 def refresh(
     _n: int,
+    target_msg: str,
     target_az: float,
     target_el: float,
     target_range: float,
+    motion_flags: list[str],
+    circle_radius: float,
+    circle_period: float,
     screen_w: int,
     screen_h: int,
     fov_x: float,
     fov_y: float,
 ) -> tuple[list[html.Div], str, str]:
+    global last_circle_send_s
+
     client.heartbeat()
-    telemetry = client.snapshot()
     range_m = float(target_range or DEFAULT_TARGET_RANGE_M)
     az = float(target_az or 0)
     el = float(target_el or 0)
+    flags = set(motion_flags or [])
+    circle_active = "circle" in flags
+    now = time.time()
+
+    if circle_active:
+        radius = max(0.0, float(circle_radius or 20))
+        period = max(0.5, float(circle_period or 8))
+        theta = 2.0 * math.pi * ((now - circle_start_s) % period) / period
+        az = math.cos(theta) * radius
+        el = math.sin(theta) * radius
+        if client.is_connected() and now - last_circle_send_s >= CIRCLE_SEND_INTERVAL_S:
+            msg = str(target_msg or "JETSON").strip()[:30] or "JETSON"
+            client.send_line(f"MSG:{msg};X:{el:.2f};Y:{az:.2f}", log_tx=False)
+            last_circle_send_s = now
+
     x, y, z = target_xyz(az, el, range_m)
 
     sw = max(120, int(screen_w or DEFAULT_SCREEN_W))
@@ -536,35 +484,22 @@ def refresh(
     screen_x, screen_y, yaw_rel, pitch_rel = screen_projection(az, el, sw, sh, fx, fy)
     outside = screen_x < 0 or screen_x > sw or screen_y < 0 or screen_y > sh
 
-    age = time.time() - telemetry.last_seen_s if telemetry.last_seen_s else 999.0
-    status = "CONNECTED" if telemetry.connected else "DISCONNECTED"
-    if telemetry.connected:
-        status += f" telemetry_age={age:.1f}s"
+    status = "CONNECTED" if client.is_connected() else "DISCONNECTED"
+    if circle_active:
+        status += " circle=ON"
 
     def metric(name: str, value: str) -> html.Div:
         return html.Div([html.B(name), html.Span(value)], className="metric")
 
     metrics = [
+        metric("circle motion", "on" if circle_active else "off"),
         metric("target azimuth", f"{az:+.1f} deg"),
         metric("target elevation", f"{el:+.1f} deg"),
         metric("assumed range", f"{range_m:.1f} m"),
         metric("target XYZ", f"{x:.1f}, {y:.1f}, {z:.1f} m"),
-        metric("device yaw/pitch/roll", f"{telemetry.yaw:+.1f}, {telemetry.pitch:+.1f}, {telemetry.roll:+.1f} deg"),
-        metric("Arduino target", f"yaw={telemetry.target_yaw:+.1f}, pitch={telemetry.target_pitch:+.1f}"),
         metric("local yawRel/pitchRel", f"{yaw_rel:+.1f}, {pitch_rel:+.1f} deg"),
-        metric("Arduino yawRel/pitchRel", f"{telemetry.yaw_rel:+.1f}, {telemetry.pitch_rel:+.1f} deg"),
         metric("screen marker", f"{screen_x:.1f}, {screen_y:.1f} px"),
         metric("outside screen", "yes" if outside else "no"),
-        metric("on target", "yes" if telemetry.on_target else "no"),
-        metric("loop dt", f"{telemetry.loop_dt_ms:.0f} ms"),
-        metric("loop", f"{telemetry.loop_us:.0f} us"),
-        metric("imu", f"{telemetry.imu_us:.0f} us"),
-        metric("tcp poll", f"{telemetry.tcp_poll_us:.0f} us"),
-        metric("tcp read", f"{telemetry.tcp_read_us:.0f} us"),
-        metric("box draw", f"{telemetry.box_us:.0f} us"),
-        metric("screen refresh", f"{telemetry.hud_us:.0f} us"),
-        metric("log file", str(LOG_PATH)),
-        metric("last TEL", telemetry.last_line[:120]),
     ]
     return metrics, status, "\n".join(client.logs())
 

@@ -31,15 +31,15 @@ TFT_LED = A0
 - TCP-сервер слушает порт `3333`.
 - IMU читается через DMP `GAME_ROTATION_VECTOR`.
 - При старте выполняется 10-секундная нулевая калибровка.
-- На экране есть HUD: `Roll`, `Pitch`, `Yaw`, `Msg`, `IP`, статус IMU и TCP.
+- На экране остаются только статусы IMU и TCP; числовой HUD не рисуется.
 - Маркер цели рисуется поверх прицела.
 - Маркер зеленый, если устройство наведено в допуске, иначе красный.
 - При `TCP WAIT` маркер полый, при `TCP OK` маркер залитый.
-- Есть throttling TCP, HUD и рендера маркера для снижения лагов.
+- Есть throttling TCP и рендера маркера для снижения лагов.
 - Настройки экрана и рендера можно менять TCP-командами.
 - EEPROM не используется: цель и `Msg` не сохраняются между перезапусками.
-- По команде `CFG:TELEMETRY:1` Arduino отдает текущие углы и состояние цели по Wi-Fi.
-- Добавлена легкая Jetson Linux control panel для задания цели, настроек и приема Wi-Fi телеметрии.
+- Обратная телеметрия Arduino -> Jetson не используется.
+- Добавлена легкая Jetson Linux control panel для задания цели, настроек и круговой проверки отрисовки.
 
 ## 4. Что сознательно не используется
 
@@ -154,7 +154,7 @@ MSG:<message>;X:<elevation_offset_deg>;Y:<azimuth_offset_deg>\n
 
 - `X` - смещение угла места от текущего pitch устройства, градусы;
 - `Y` - смещение азимута от текущего yaw устройства, градусы;
-- `message` - короткая подпись для HUD.
+- `message` - короткая подпись пакета, на TFT сейчас не выводится.
 
 Пример:
 
@@ -178,14 +178,14 @@ CFG:BOX_SIZE:<px>
 CFG:BOX_REFRESH_MS:<ms>
 CFG:BOX_RENDER:<0|1>
 CFG:BOX_DELTA_RENDER:<0|1>
-CFG:TELEMETRY:<0|1>
 MSGONLY:<text>
 ```
 
 `CMD:CENTER` оставлен как legacy-команда. Основная центровка клиента должна
 отправлять `MSG:<text>;X:0;Y:0`, чтобы нулевая цель оставалась в центре экрана.
 
-`MSGONLY:<text>` обновляет строку `Msg` на Arduino без изменения углов цели.
+`MSGONLY:<text>` принимается Arduino без изменения углов цели; на TFT строка
+`Msg` сейчас не выводится.
 
 `CFG:DEG_PER_PX:<value>` оставлен только как legacy-команда. Прошивка переводит
 ее в:
@@ -194,29 +194,6 @@ MSGONLY:<text>
 FOV_X = value * SCREEN_W
 FOV_Y = value * SCREEN_H
 ```
-
-### Телеметрия от Arduino
-
-По умолчанию телеметрия выключена, чтобы старые GUI не заполняли лог. Новая
-Jetson control panel включает ее после подключения:
-
-```text
-CFG:TELEMETRY:1
-```
-
-Формат строки:
-
-```text
-TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>;LOOP_DT_MS:<ms>;LOOP_US:<us>;IMU_US:<us>;TCP_POLL_US:<us>;TCP_READ_US:<us>;BOX_US:<us>;HUD_US:<us>
-```
-
-Эта строка нужна для контрольной панели: Jetson получает ориентацию устройства
-по Wi-Fi и показывает ее в таблице текущих значений.
-
-Jetson control panel также пишет каждую строку `TEL` в `log.txt` в рабочей
-директории. Контрольная проверка IMU выполняется так: устройство лежит
-неподвижно, панель подключена к Arduino, телеметрия включена, затем по `log.txt`
-оцениваются дрейф `roll/pitch/yaw`, `LOOP_DT_MS` и задержки `*_US`.
 
 Jetson control panel отправляет `PING` примерно раз в секунду без записи в лог.
 Это удерживает TCP-соединение активным, потому что Arduino закрывает клиента по
@@ -231,7 +208,7 @@ Jetson control panel отправляет `PING` примерно раз в се
 - `lib/ILI9488/` - локальная библиотека дисплея;
 - `tools/windows_tcp_gui.py` - Windows GUI;
 - `tools/jetson_tcp_gui.py` - Linux/Jetson GUI;
-- `tools/jetson_wifi_visualize.py` - Jetson Linux control panel без графиков, с Wi-Fi телеметрией Arduino;
+- `tools/jetson_wifi_visualize.py` - Jetson Linux control panel без графиков и без обратной телеметрии Arduino;
 - `tools/yolo11n.pt` и `tools/quadron_1280.onnx` - опциональные модели для GUI;
 - `requirements-jetson-viz.txt` - зависимости Jetson control panel;
 - `README.md` и `task.md`.
@@ -301,20 +278,20 @@ http://127.0.0.1:8050
 Возможности:
 
 - подключение к Arduino TCP `192.168.4.1:3333`;
-- включение Wi-Fi телеметрии `CFG:TELEMETRY:1`;
 - задание цели углами `azimuth/elevation/range`;
 - расчет контрольных координат цели `X/Y/Z`;
 - отправка текущей цели на Arduino в формате `MSG:JETSON;X:<elevation_offset>;Y:<azimuth_offset>`;
+- круговое движение цели для проверки отрисовки маркера на TFT;
 - отправка `MSGONLY:<text>` на Arduino без изменения цели;
 - изменение FOV, размера квадрата, частот TCP/отрисовки и флагов рендера;
-- отображение текущей Wi-Fi телеметрии без Plotly-графиков.
+- отображение локального preview цели без Wi-Fi телеметрии.
 
 ## 10. Требования к поведению
 
 - После старта устройство должно дождаться IMU и выполнить нулевую калибровку.
 - Без TCP-клиента устройство должно показывать `TCP WAIT`.
 - При подключении TCP-клиента статус должен стать `TCP OK`.
-- Пакет `MSG` должен обновлять цель и строку `Msg` только в RAM.
+- Пакет `MSG` должен обновлять цель только в RAM.
 - Jetson-кнопка Center Arduino должна отправлять `MSG` с `X=0;Y=0`, чтобы
   центрировать цель на текущем направлении устройства.
 - EEPROM должен быть выключен: цель не должна восстанавливаться после reset.
