@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
@@ -20,6 +21,7 @@ DEFAULT_FOV_X_DEG = 60.0
 DEFAULT_FOV_Y_DEG = 80.0
 DEFAULT_BOX_SIZE_PX = 50
 DEFAULT_BOX_REFRESH_MS = 33
+LOG_PATH = Path("log.txt")
 
 
 @dataclass
@@ -61,6 +63,7 @@ class ArduinoTcpClient:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.connect((host, port))
             sock.settimeout(0.2)
         except Exception as exc:
@@ -72,7 +75,7 @@ class ArduinoTcpClient:
             self._telemetry.last_seen_s = time.time()
 
         self._stop.clear()
-        self._thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self._thread = threading.Thread(target=self._rx_loop, args=(sock,), daemon=True)
         self._thread.start()
 
         self.send_line("CFG:TELEMETRY:1")
@@ -80,12 +83,14 @@ class ArduinoTcpClient:
         self.send_line("PING")
         self._last_ping_s = time.time()
         self._log(f"Connected to {host}:{port}")
+        self._log_file_line(f"# connected {host}:{port}")
         return "CONNECTED"
 
     def disconnect(self) -> None:
         self._stop.set()
         with self._lock:
             sock = self._sock
+            thread = self._thread
             self._sock = None
             self._telemetry.connected = False
         if sock is not None:
@@ -97,6 +102,11 @@ class ArduinoTcpClient:
                 sock.close()
             except Exception:
                 pass
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=1.0)
+        with self._lock:
+            if self._thread is thread:
+                self._thread = None
 
     def send_line(self, line: str, log_tx: bool = True) -> bool:
         if not line.endswith("\n"):
@@ -113,6 +123,7 @@ class ArduinoTcpClient:
             return True
         except Exception as exc:
             self._log(f"TX ERROR: {exc}")
+            self._log_file_line(f"# tx_error {exc}")
             self.disconnect()
             return False
 
@@ -144,10 +155,20 @@ class ArduinoTcpClient:
             except queue.Empty:
                 pass
 
-    def _rx_loop(self) -> None:
+    def _log_file_line(self, message: str) -> None:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(f"{stamp} {message}\n")
+        except OSError as exc:
+            self._log(f"LOG FILE ERROR: {exc}")
+
+    def _rx_loop(self, rx_sock: socket.socket) -> None:
         buffer = b""
         while not self._stop.is_set():
             with self._lock:
+                if self._sock is not rx_sock:
+                    break
                 sock = self._sock
             if sock is None:
                 break
@@ -160,6 +181,7 @@ class ArduinoTcpClient:
                 continue
             except Exception as exc:
                 self._log(f"RX ERROR: {exc}")
+                self._log_file_line(f"# rx_error {exc}")
                 break
 
             while b"\n" in buffer:
@@ -169,12 +191,18 @@ class ArduinoTcpClient:
                     self._handle_line(line)
 
         with self._lock:
-            self._sock = None
-            self._telemetry.connected = False
-        self._log("Disconnected")
+            is_current = self._sock is rx_sock
+            if is_current:
+                self._sock = None
+                self._telemetry.connected = False
+                self._thread = None
+        if is_current:
+            self._log("Disconnected")
+            self._log_file_line("# disconnected")
 
     def _handle_line(self, line: str) -> None:
         if line.startswith("TEL;"):
+            self._log_file_line(line)
             parsed = parse_telemetry(line)
             with self._lock:
                 current = self._telemetry
@@ -535,6 +563,7 @@ def refresh(
         metric("tcp read", f"{telemetry.tcp_read_us:.0f} us"),
         metric("box draw", f"{telemetry.box_us:.0f} us"),
         metric("screen refresh", f"{telemetry.hud_us:.0f} us"),
+        metric("log file", str(LOG_PATH)),
         metric("last TEL", telemetry.last_line[:120]),
     ]
     return metrics, status, "\n".join(client.logs())

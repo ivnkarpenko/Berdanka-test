@@ -62,7 +62,7 @@ constexpr uint32_t HUD_REFRESH_MS = 5000;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
 constexpr uint32_t TCP_TELEMETRY_MS = 1000;
 constexpr uint32_t DEFAULT_TCP_POLL_MS = 80;
-constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 2500;
+constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 10000;
 constexpr uint32_t DEFAULT_BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
@@ -290,8 +290,10 @@ void drawTCPStatus(bool tcpConnected) {
                           lastTcpStatusColor, 28);
 }
 
-// Полный рефреш HUD (раз в 10 сек)
+// Force-refresh only the text/status HUD area. Do not clear the whole screen:
+// the target box renderer owns the moving graphics area.
 void refreshHUDForce(int16_t rollQ, int16_t pitchQ, int16_t yawQ) {
+  tft.fillRect(0, 0, 220, 155, ILI9488_BLACK);
   drawStaticTextLabels();
 
   char buf[16];
@@ -421,13 +423,13 @@ bool readAnglesOnce(float &outRoll, float &outPitch, float &outYaw) {
   if (!zeroSet) {
     outRoll = roll;
     outPitch = pitch;
-    outYaw = wrapAngle180f(yaw);
+    outYaw = wrapAngle180f(-yaw);
     return true;
   }
 
   roll  -= zeroRoll;
   pitch -= zeroPitch;
-  yaw   -= zeroYaw;
+  yaw    = zeroYaw - yaw;
   yaw    = wrapAngle180f(yaw);
 
   if (fabsf(deltaAngle180f(yaw, lastYaw)) > yawDriftLimitDeg) {
@@ -1118,12 +1120,9 @@ void loop() {
     boxDrawUs = micros() - boxDrawStartUs;
   }
 
-  // ===== Screen refresh every 5s =====
+  // ===== HUD text refresh every 5s =====
   if (ENABLE_PERIODIC_HUD_REFRESH && (millis() - lastHudRefreshMs >= HUD_REFRESH_MS)) {
     uint32_t hudRefreshStartUs = micros();
-    tft.fillScreen(ILI9488_BLACK);
-    drawCrossFull();
-    lastBoxValid = false;
     refreshHUDForce(rQ, pQ, yQ);
     hudRefreshUs = micros() - hudRefreshStartUs;
   }

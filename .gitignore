@@ -8,6 +8,7 @@ __pycache__/
 tools/__pycache__/
 yolo_quadro_weights/
 runs/
+log.txt
 *.engine
 *.plan
 *.so
