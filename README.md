@@ -24,7 +24,7 @@ UWB, DeepStream и TensorRT engine в текущей версии не испо�
 Расчет согласован с `berdanka-vizualize`:
 
 ```text
-yaw_offset_deg = device_yaw_deg - target_azimuth_deg
+yaw_offset_deg = target_azimuth_deg - device_yaw_deg
 elevation_offset_deg = target_elevation_deg - device_pitch_deg
 
 px_per_deg_x = SCREEN_W / FOV_X
@@ -55,14 +55,18 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 Основной пакет:
 
 ```text
-MSG:<text>;X:<elevation_deg>;Y:<azimuth_deg>\n
+MSG:<text>;X:<elevation_offset_deg>;Y:<azimuth_offset_deg>\n
 ```
 
 Пример:
 
 ```text
-MSG:TARGET;X:5.0;Y:-12.0
+MSG:TARGET;X:5.0;Y:12.0
 ```
+
+`X=0;Y=0` означает текущий центр устройства. Положительный `Y` смещает маркер
+вправо, положительный `X` смещает маркер вверх. Дальность в Arduino сейчас не
+используется и не влияет на положение квадрата без UWB/позиции устройства.
 
 Служебные команды:
 
@@ -80,13 +84,16 @@ CFG:TELEMETRY:<0|1>
 MSGONLY:<text>
 ```
 
+`CMD:CENTER` оставлен для совместимости. Основная центровка в Jetson-панели
+отправляет `MSG:<text>;X:0;Y:0`.
+
 Старый `CFG:DEG_PER_PX:<value>` оставлен только для совместимости и внутри
 прошивки пересчитывается в `FOV_X/FOV_Y`.
 
 Если включена `CFG:TELEMETRY:1`, Arduino отправляет строки:
 
 ```text
-TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>
+TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>;LOOP_DT_MS:<ms>;LOOP_US:<us>;IMU_US:<us>;TCP_POLL_US:<us>;TCP_READ_US:<us>;BOX_US:<us>;HUD_US:<us>
 ```
 
 Jetson control panel отправляет тихий `PING` примерно раз в секунду, чтобы Arduino

@@ -58,16 +58,16 @@ constexpr int16_t STATUS_Y_IMU  = 110;
 constexpr int16_t STATUS_Y_TCP  = 136;
 
 // HUD auto refresh
-constexpr uint32_t HUD_REFRESH_MS = 10000;
+constexpr uint32_t HUD_REFRESH_MS = 5000;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
-constexpr uint32_t TCP_TELEMETRY_MS = 250;
+constexpr uint32_t TCP_TELEMETRY_MS = 1000;
 constexpr uint32_t DEFAULT_TCP_POLL_MS = 80;
 constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 2500;
 constexpr uint32_t DEFAULT_BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
 constexpr bool ENABLE_PACKET_ACK = false;
-constexpr bool ENABLE_PERIODIC_HUD_REFRESH = false;
+constexpr bool ENABLE_PERIODIC_HUD_REFRESH = true;
 
 // edge marker visible thickness (px)
 constexpr int16_t DEFAULT_EDGE_VISIBLE_PX = 5;
@@ -104,6 +104,12 @@ int16_t  edgeVisiblePx = DEFAULT_EDGE_VISIBLE_PX;
 bool     boxRenderEnabled = true;
 bool     boxDeltaRenderEnabled = true;
 bool     tcpTelemetryEnabled = false;
+uint32_t lastLoopUs = 0;
+uint32_t lastImuReadUs = 0;
+uint32_t lastNetPollUs = 0;
+uint32_t lastNetReadUs = 0;
+uint32_t lastBoxDrawUs = 0;
+uint32_t lastHudRefreshUs = 0;
 
 // ================== TARGET (from TCP client) ==================
 int16_t spawnPitchQ = 0;
@@ -1052,9 +1058,10 @@ void loop() {
 
         if (parsePacket(line, msg, x, y)) {
           lastTcpAliveMs = nowMs;
-          // target angles (deg, step 2)
-          spawnPitchQ = quantizeDeg2((float)x);
-          spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
+          // Target packet X/Y are offsets from the current device direction.
+          // X=0/Y=0 means the marker is centered at the current pose.
+          spawnPitchQ = pQ + quantizeDeg2((float)x);
+          spawnYawQ   = wrapAngle180i(yQ + quantizeDeg2((float)y));
           spawnSet    = true;
 
           // Msg на HUD
@@ -1097,10 +1104,37 @@ void loop() {
   int16_t targetPitchQ = spawnSet ? spawnPitchQ : 0;
   int16_t targetYawQ   = spawnSet ? spawnYawQ : 0;
   int16_t pitchRelQ = targetPitchQ - pQ;
-  int16_t yawRelQ   = deltaAngle180i(yQ, targetYawQ);
+  int16_t yawRelQ   = deltaAngle180i(targetYawQ, yQ);
 
   bool onTarget = (abs((int)pitchRelQ) <= TARGET_TOL_DEG) &&
                   (abs((int)yawRelQ)   <= TARGET_TOL_DEG);
+
+  if (!boxRenderEnabled) {
+    eraseOldBox();
+  } else if (nowMs - lastBoxDrawMs >= boxRefreshIntervalMs) {
+    uint32_t boxDrawStartUs = micros();
+    updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected);
+    lastBoxDrawMs = nowMs;
+    boxDrawUs = micros() - boxDrawStartUs;
+  }
+
+  // ===== Screen refresh every 5s =====
+  if (ENABLE_PERIODIC_HUD_REFRESH && (millis() - lastHudRefreshMs >= HUD_REFRESH_MS)) {
+    uint32_t hudRefreshStartUs = micros();
+    tft.fillScreen(ILI9488_BLACK);
+    drawCrossFull();
+    lastBoxValid = false;
+    refreshHUDForce(rQ, pQ, yQ);
+    hudRefreshUs = micros() - hudRefreshStartUs;
+  }
+
+  uint32_t loopUs = micros() - loopStartUs;
+  lastLoopUs = loopUs;
+  lastImuReadUs = imuReadUs;
+  lastNetPollUs = netPollUs;
+  lastNetReadUs = netReadUs;
+  lastBoxDrawUs = boxDrawUs;
+  lastHudRefreshUs = hudRefreshUs;
 
   if (tcpConnected && tcpTelemetryEnabled && (nowMs - lastTcpTelemetryMs >= TCP_TELEMETRY_MS)) {
     client.print("TEL;ROLL:");
@@ -1122,27 +1156,23 @@ void loop() {
     client.print(";FOV_Y:");
     client.print(displayFovYDeg, 2);
     client.print(";ON_TARGET:");
-    client.println(onTarget ? 1 : 0);
+    client.print(onTarget ? 1 : 0);
+    client.print(";LOOP_DT_MS:");
+    client.print(loopDtMs);
+    client.print(";LOOP_US:");
+    client.print(lastLoopUs);
+    client.print(";IMU_US:");
+    client.print(lastImuReadUs);
+    client.print(";TCP_POLL_US:");
+    client.print(lastNetPollUs);
+    client.print(";TCP_READ_US:");
+    client.print(lastNetReadUs);
+    client.print(";BOX_US:");
+    client.print(lastBoxDrawUs);
+    client.print(";HUD_US:");
+    client.println(lastHudRefreshUs);
     lastTcpTelemetryMs = nowMs;
   }
-
-  if (!boxRenderEnabled) {
-    eraseOldBox();
-  } else if (nowMs - lastBoxDrawMs >= boxRefreshIntervalMs) {
-    uint32_t boxDrawStartUs = micros();
-    updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected);
-    lastBoxDrawMs = nowMs;
-    boxDrawUs = micros() - boxDrawStartUs;
-  }
-
-  // ===== HUD refresh every 10s =====
-  if (ENABLE_PERIODIC_HUD_REFRESH && (millis() - lastHudRefreshMs >= HUD_REFRESH_MS)) {
-    uint32_t hudRefreshStartUs = micros();
-    refreshHUDForce(rQ, pQ, yQ);
-    hudRefreshUs = micros() - hudRefreshStartUs;
-  }
-
-  uint32_t loopUs = micros() - loopStartUs;
   if (ENABLE_SERIAL_DEBUG && (millis() - lastSerialDebugMs >= SERIAL_DEBUG_MS)) {
     Serial.print("DBG loop_dt_ms=");
     Serial.print(loopDtMs);

@@ -35,6 +35,13 @@ class Telemetry:
     fov_x: float = DEFAULT_FOV_X_DEG
     fov_y: float = DEFAULT_FOV_Y_DEG
     on_target: bool = False
+    loop_dt_ms: float = 0.0
+    loop_us: float = 0.0
+    imu_us: float = 0.0
+    tcp_poll_us: float = 0.0
+    tcp_read_us: float = 0.0
+    box_us: float = 0.0
+    hud_us: float = 0.0
     last_seen_s: float = 0.0
     last_line: str = "-"
 
@@ -192,6 +199,13 @@ def parse_telemetry(line: str) -> dict[str, Any]:
         "FOV_X": "fov_x",
         "FOV_Y": "fov_y",
         "ON_TARGET": "on_target",
+        "LOOP_DT_MS": "loop_dt_ms",
+        "LOOP_US": "loop_us",
+        "IMU_US": "imu_us",
+        "TCP_POLL_US": "tcp_poll_us",
+        "TCP_READ_US": "tcp_read_us",
+        "BOX_US": "box_us",
+        "HUD_US": "hud_us",
     }
     values: dict[str, Any] = {}
     for part in line.split(";")[1:]:
@@ -227,17 +241,15 @@ def target_xyz(azimuth_deg: float, elevation_deg: float, range_m: float) -> tupl
 
 
 def screen_projection(
-    target_yaw: float,
-    target_pitch: float,
-    device_yaw: float,
-    device_pitch: float,
+    target_yaw_offset: float,
+    target_pitch_offset: float,
     screen_w: int,
     screen_h: int,
     fov_x: float,
     fov_y: float,
 ) -> tuple[float, float, float, float]:
-    yaw_rel = wrap180(device_yaw - target_yaw)
-    pitch_rel = target_pitch - device_pitch
+    yaw_rel = wrap180(target_yaw_offset)
+    pitch_rel = target_pitch_offset
     x = screen_w / 2.0 + yaw_rel * screen_w / max(1e-6, fov_x)
     y = screen_h / 2.0 - pitch_rel * screen_h / max(1e-6, fov_y)
     return x, y, yaw_rel, pitch_rel
@@ -280,8 +292,8 @@ app.layout = html.Div(
                         html.H2("Target"),
                         field("Msg on Arduino", dcc.Input(id="target-msg", value="JETSON", type="text", maxLength=30)),
                         field("Azimuth, deg", dcc.Slider(id="target-az", min=-180, max=180, step=1, value=0, marks={-180: "-180", 0: "0", 180: "180"})),
-                        field("Elevation, deg", dcc.Slider(id="target-el", min=-45, max=45, step=1, value=0, marks={-45: "-45", 0: "0", 45: "45"})),
-                        field("Assumed range, m", dcc.Slider(id="target-range", min=50, max=1000, step=10, value=DEFAULT_TARGET_RANGE_M, marks={100: "100", 300: "300", 600: "600", 1000: "1000"})),
+                        field("Elevation, deg", dcc.Slider(id="target-el", min=-90, max=90, step=1, value=0, marks={-90: "-90", 0: "0", 90: "90"})),
+                        field("Assumed range, m (XYZ only)", dcc.Slider(id="target-range", min=50, max=1000, step=10, value=DEFAULT_TARGET_RANGE_M, marks={100: "100", 300: "300", 600: "600", 1000: "1000"})),
                         html.Div(
                             [
                                 html.Button("Send Target", id="send-target"),
@@ -318,7 +330,7 @@ app.layout = html.Div(
                             options=[
                                 {"label": "Draw box", "value": "box"},
                                 {"label": "Delta fill", "value": "delta"},
-                                {"label": "Telemetry", "value": "tel"},
+                                {"label": "Telemetry (slower)", "value": "tel"},
                             ],
                             value=["box", "delta", "tel"],
                             inline=True,
@@ -343,7 +355,7 @@ app.layout = html.Div(
             ],
             className="right",
         ),
-        dcc.Interval(id="tick", interval=500, n_intervals=0),
+        dcc.Interval(id="tick", interval=1000, n_intervals=0),
     ],
     className="app",
 )
@@ -442,7 +454,7 @@ def actions(
     elif trigger == "send-msg":
         client.send_line(f"MSGONLY:{msg}")
     elif trigger == "center":
-        client.send_line("CMD:CENTER")
+        client.send_line(f"MSG:{msg};X:0.00;Y:0.00")
     elif trigger == "send-display":
         client.send_line(f"CFG:FOV_X:{float(fov_x or DEFAULT_FOV_X_DEG):.2f}")
         client.send_line(f"CFG:FOV_Y:{float(fov_y or DEFAULT_FOV_Y_DEG):.2f}")
@@ -493,7 +505,7 @@ def refresh(
     sh = max(120, int(screen_h or DEFAULT_SCREEN_H))
     fx = max(5.0, float(fov_x or DEFAULT_FOV_X_DEG))
     fy = max(5.0, float(fov_y or DEFAULT_FOV_Y_DEG))
-    screen_x, screen_y, yaw_rel, pitch_rel = screen_projection(az, el, telemetry.yaw, telemetry.pitch, sw, sh, fx, fy)
+    screen_x, screen_y, yaw_rel, pitch_rel = screen_projection(az, el, sw, sh, fx, fy)
     outside = screen_x < 0 or screen_x > sw or screen_y < 0 or screen_y > sh
 
     age = time.time() - telemetry.last_seen_s if telemetry.last_seen_s else 999.0
@@ -516,6 +528,13 @@ def refresh(
         metric("screen marker", f"{screen_x:.1f}, {screen_y:.1f} px"),
         metric("outside screen", "yes" if outside else "no"),
         metric("on target", "yes" if telemetry.on_target else "no"),
+        metric("loop dt", f"{telemetry.loop_dt_ms:.0f} ms"),
+        metric("loop", f"{telemetry.loop_us:.0f} us"),
+        metric("imu", f"{telemetry.imu_us:.0f} us"),
+        metric("tcp poll", f"{telemetry.tcp_poll_us:.0f} us"),
+        metric("tcp read", f"{telemetry.tcp_read_us:.0f} us"),
+        metric("box draw", f"{telemetry.box_us:.0f} us"),
+        metric("screen refresh", f"{telemetry.hud_us:.0f} us"),
         metric("last TEL", telemetry.last_line[:120]),
     ]
     return metrics, status, "\n".join(client.logs())

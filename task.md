@@ -126,7 +126,7 @@ device_pitch_deg
 Смещения:
 
 ```text
-yaw_offset_deg = wrap180(device_yaw_deg - target_azimuth_deg)
+yaw_offset_deg = wrap180(target_azimuth_deg - device_yaw_deg)
 elevation_offset_deg = target_elevation_deg - device_pitch_deg
 ```
 
@@ -137,7 +137,8 @@ screen_x = CX + yaw_offset_deg * px_per_deg_x
 screen_y = CY - elevation_offset_deg * px_per_deg_y
 ```
 
-Знак yaw оставлен в старой логике прошивки: `device_yaw - target_yaw`.
+Знак yaw: положительный азимут цели уходит вправо на экране, то есть
+`target_yaw - device_yaw`.
 
 ## 7. TCP-протокол
 
@@ -146,20 +147,24 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 Формат оставлен совместимым со старым GUI:
 
 ```text
-MSG:<message>;X:<elevation_deg>;Y:<azimuth_deg>\n
+MSG:<message>;X:<elevation_offset_deg>;Y:<azimuth_offset_deg>\n
 ```
 
 Где:
 
-- `X` - угол места цели, градусы;
-- `Y` - азимут цели, градусы;
+- `X` - смещение угла места от текущего pitch устройства, градусы;
+- `Y` - смещение азимута от текущего yaw устройства, градусы;
 - `message` - короткая подпись для HUD.
 
 Пример:
 
 ```text
-MSG:TARGET;X:4.5;Y:-18.0
+MSG:TARGET;X:4.5;Y:18.0
 ```
+
+`X=0;Y=0` центрирует цель на текущем направлении устройства. Это основная
+семантика центровки: нулевая цель от клиента должна оставлять квадрат в центре.
+Положительный `Y` рисуется справа, положительный `X` рисуется выше центра.
 
 ### Служебные команды
 
@@ -177,7 +182,8 @@ CFG:TELEMETRY:<0|1>
 MSGONLY:<text>
 ```
 
-`CMD:CENTER` записывает текущие `pitch/yaw` как целевые углы и центрирует маркер.
+`CMD:CENTER` оставлен как legacy-команда. Основная центровка клиента должна
+отправлять `MSG:<text>;X:0;Y:0`, чтобы нулевая цель оставалась в центре экрана.
 
 `MSGONLY:<text>` обновляет строку `Msg` на Arduino без изменения углов цели.
 
@@ -201,7 +207,7 @@ CFG:TELEMETRY:1
 Формат строки:
 
 ```text
-TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>
+TEL;ROLL:<deg>;PITCH:<deg>;YAW:<deg>;TARGET_PITCH:<deg>;TARGET_YAW:<deg>;PITCH_REL:<deg>;YAW_REL:<deg>;FOV_X:<deg>;FOV_Y:<deg>;ON_TARGET:<0|1>;LOOP_DT_MS:<ms>;LOOP_US:<us>;IMU_US:<us>;TCP_POLL_US:<us>;TCP_READ_US:<us>;BOX_US:<us>;HUD_US:<us>
 ```
 
 Эта строка нужна для контрольной панели: Jetson получает ориентацию устройства
@@ -293,7 +299,7 @@ http://127.0.0.1:8050
 - включение Wi-Fi телеметрии `CFG:TELEMETRY:1`;
 - задание цели углами `azimuth/elevation/range`;
 - расчет контрольных координат цели `X/Y/Z`;
-- отправка текущей цели на Arduino в формате `MSG:JETSON;X:<elevation>;Y:<azimuth>`;
+- отправка текущей цели на Arduino в формате `MSG:JETSON;X:<elevation_offset>;Y:<azimuth_offset>`;
 - отправка `MSGONLY:<text>` на Arduino без изменения цели;
 - изменение FOV, размера квадрата, частот TCP/отрисовки и флагов рендера;
 - отображение текущей Wi-Fi телеметрии без Plotly-графиков.
@@ -304,10 +310,12 @@ http://127.0.0.1:8050
 - Без TCP-клиента устройство должно показывать `TCP WAIT`.
 - При подключении TCP-клиента статус должен стать `TCP OK`.
 - Пакет `MSG` должен обновлять цель и строку `Msg` только в RAM.
-- `CMD:CENTER` должен центрировать цель на текущем направлении устройства.
+- Jetson-кнопка Center Arduino должна отправлять `MSG` с `X=0;Y=0`, чтобы
+  центрировать цель на текущем направлении устройства.
 - EEPROM должен быть выключен: цель не должна восстанавливаться после reset.
-- Yaw-смещение должно считаться по старой конвенции `device_yaw - target_yaw`.
+- Yaw-смещение должно считаться как `target_yaw - device_yaw`, чтобы положительный азимут рисовался справа.
 - Цель выше текущего pitch должна двигать маркер вверх.
+- `MSG` с `X=0;Y=0` должен центрировать цель на текущей ориентации устройства.
 - Изменение `FOV_X/FOV_Y` должно менять масштаб маркера без перепрошивки.
 - Маркер должен оставаться частично видимым у края экрана.
 - Jetson control panel должен иметь предполагаемую дальность цели `300 м` по умолчанию.
