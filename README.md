@@ -9,7 +9,7 @@
 
 ## Текущий сценарий
 
-1. Arduino поднимает Wi-Fi AP и TCP-сервер на порту `3333`.
+1. Arduino поднимает Wi-Fi AP, TCP-сервер и UDP-приемник на порту `3333`.
 2. Клиент отправляет целеуказание: угол места и азимут цели.
 3. Прошивка читает ориентацию устройства из IMU.
 4. TFT показывает маркер цели относительно текущего yaw/pitch устройства.
@@ -39,7 +39,7 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 
 ## Структура
 
-- `src/main.cpp` - прошивка Arduino: IMU, Wi-Fi/TCP, парсинг команд, TFT-статусы и маркер цели.
+- `src/main.cpp` - прошивка Arduino: IMU, Wi-Fi TCP/UDP, парсинг команд, TFT-статусы и маркер цели.
 - `platformio.ini` - сборка PlatformIO для `uno_r4_wifi`.
 - `lib/ILI9488/` - локальная библиотека дисплея.
 - `tools/windows_tcp_gui.py` - TCP GUI для Windows.
@@ -50,7 +50,7 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 - `requirements-jetson-viz.txt` - зависимости для Jetson control panel.
 - `task.md` - ТЗ, протокол, ограничения и будущие этапы.
 
-## TCP протокол
+## Wi-Fi протокол
 
 Основной пакет:
 
@@ -90,7 +90,8 @@ MSGONLY:<text>
 прошивки пересчитывается в `FOV_X/FOV_Y`.
 
 Jetson control panel отправляет тихий `PING` примерно раз в секунду, чтобы Arduino
-не закрывала TCP по heartbeat timeout.
+не закрывала TCP по heartbeat timeout и чтобы UDP-статус оставался `UDP OK`.
+Для частой передачи цели предпочтителен UDP; TCP оставлен как fallback.
 
 ## Сборка
 

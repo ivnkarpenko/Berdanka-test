@@ -6,6 +6,7 @@
 #include <ILI9488.h>
 #include "ICM_20948.h"
 #include <WiFiS3.h>
+#include <WiFiUdp.h>
 
 // ================== WIFI ==================
 // Previous network
@@ -20,6 +21,7 @@ constexpr uint16_t SERVER_PORT = 3333;
 
 WiFiServer server(SERVER_PORT);
 WiFiClient client;
+WiFiUDP udp;
 
 // ================== DISPLAY ==================
 constexpr uint8_t TFT_CS   = 10;
@@ -52,6 +54,7 @@ constexpr int16_t STATUS_Y_TCP  = 36;
 constexpr uint32_t TCP_STATUS_REFRESH_MS = 200;
 constexpr uint32_t DEFAULT_TCP_POLL_MS = 80;
 constexpr uint32_t TCP_ALIVE_TIMEOUT_MS = 10000;
+constexpr uint32_t UDP_ALIVE_TIMEOUT_MS = 2500;
 constexpr uint32_t DEFAULT_BOX_REFRESH_MS = 33;     // ~30 FPS box redraw cap
 constexpr uint32_t SERIAL_DEBUG_MS = 2000;  // reduce serial overhead
 constexpr bool ENABLE_SERIAL_DEBUG = true;
@@ -66,8 +69,10 @@ uint32_t lastBoxDrawMs = 0;
 uint32_t lastSerialDebugMs = 0;
 uint32_t lastLoopTickMs = 0;
 bool     lastTcpConnectedState = false;
+bool     lastUdpConnectedState = false;
 bool     tcpConnectedCached = false;
 uint32_t lastTcpAliveMs = 0;
+uint32_t lastUdpAliveMs = 0;
 
 char lastImuStatusLine[40] = "";
 char lastTcpStatusLine[40] = "";
@@ -207,14 +212,16 @@ void drawIMUStatus(const char* text, uint16_t color) {
                           lastImuStatusColor, 28);
 }
 
-void drawTCPStatus(bool tcpConnected) {
+void drawNetStatus(bool tcpConnected, bool udpConnected) {
   char line[40];
   if (tcpConnected) {
     snprintf(line, sizeof(line), "TCP OK");
+  } else if (udpConnected) {
+    snprintf(line, sizeof(line), "UDP OK");
   } else {
-    snprintf(line, sizeof(line), "TCP WAIT");
+    snprintf(line, sizeof(line), "NET WAIT");
   }
-  uint16_t color = tcpConnected ? ILI9488_GREEN : ILI9488_YELLOW;
+  uint16_t color = (tcpConnected || udpConnected) ? ILI9488_GREEN : ILI9488_YELLOW;
 
   drawStatusLineIfChanged(STATUS_X, STATUS_Y_TCP, line,
                           color, lastTcpStatusLine, sizeof(lastTcpStatusLine),
@@ -538,6 +545,150 @@ static bool parsePacket(const String& s, String& msg, float& x, float& y) {
   return true;
 }
 
+void eraseOldBox();
+
+void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFiClient* replyClient) {
+  line.trim();
+  if (line.length() == 0) return;
+
+  float newDegPerPx = 0.0f;
+  float newFovXDeg = 0.0f;
+  float newFovYDeg = 0.0f;
+  uint32_t newTcpPollMs = 0;
+  int16_t newBoxSizePx = 0;
+  uint32_t newBoxRefreshMs = 0;
+  String msgOnly;
+  bool newBoxRenderEnabled = false;
+  bool newBoxDeltaRenderEnabled = false;
+  bool fromTcp = (replyClient != nullptr);
+
+  if (isPingCommand(line)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+  } else if (parseMsgOnlyCommand(line, msgOnly)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    char msgBuf[48];
+    msgOnly.toCharArray(msgBuf, sizeof(msgBuf));
+    msgBuf[30] = '\0';
+    Serial.print("Msg updated: ");
+    Serial.println(msgBuf);
+    if (ENABLE_PACKET_ACK && replyClient) {
+      replyClient->print("ACK;MSGONLY:");
+      replyClient->println(msgBuf);
+    }
+  } else if (parseDisplayFovXCommand(line, newFovXDeg)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    displayFovXDeg = newFovXDeg;
+    eraseOldBox();
+    Serial.print("Display FOV X updated: ");
+    Serial.println(displayFovXDeg, 2);
+    if (ENABLE_PACKET_ACK && replyClient) {
+      replyClient->print("ACK;CFG:FOV_X:");
+      replyClient->println(displayFovXDeg, 2);
+    }
+  } else if (parseDisplayFovYCommand(line, newFovYDeg)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    displayFovYDeg = newFovYDeg;
+    eraseOldBox();
+    Serial.print("Display FOV Y updated: ");
+    Serial.println(displayFovYDeg, 2);
+    if (ENABLE_PACKET_ACK && replyClient) {
+      replyClient->print("ACK;CFG:FOV_Y:");
+      replyClient->println(displayFovYDeg, 2);
+    }
+  } else if (parseTcpPollMsCommand(line, newTcpPollMs)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    tcpPollIntervalMs = newTcpPollMs;
+    Serial.print("TCP poll interval updated: ");
+    Serial.println(tcpPollIntervalMs);
+    if (ENABLE_PACKET_ACK && replyClient) {
+      replyClient->print("ACK;CFG:TCP_POLL_MS:");
+      replyClient->println(tcpPollIntervalMs);
+    }
+  } else if (parseBoxSizeCommand(line, newBoxSizePx)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    boxSizePx = newBoxSizePx;
+    eraseOldBox();
+    Serial.print("Box size updated: ");
+    Serial.println(boxSizePx);
+  } else if (parseBoxRefreshMsCommand(line, newBoxRefreshMs)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    boxRefreshIntervalMs = newBoxRefreshMs;
+    Serial.print("Box refresh ms updated: ");
+    Serial.println(boxRefreshIntervalMs);
+  } else if (parseBoxRenderCommand(line, newBoxRenderEnabled)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    boxRenderEnabled = newBoxRenderEnabled;
+    if (!boxRenderEnabled) eraseOldBox();
+    Serial.print("Box render updated: ");
+    Serial.println(boxRenderEnabled ? "ON" : "OFF");
+  } else if (parseBoxDeltaRenderCommand(line, newBoxDeltaRenderEnabled)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    boxDeltaRenderEnabled = newBoxDeltaRenderEnabled;
+    Serial.print("Box delta render updated: ");
+    Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
+  } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    displayFovXDeg = newDegPerPx * (float)SCREEN_W;
+    displayFovYDeg = newDegPerPx * (float)SCREEN_H;
+    eraseOldBox();
+    Serial.print("Legacy display deg/px converted to FOV X/Y: ");
+    Serial.print(displayFovXDeg, 2);
+    Serial.print("/");
+    Serial.println(displayFovYDeg, 2);
+    if (ENABLE_PACKET_ACK && replyClient) {
+      replyClient->print("ACK;CFG:DEG_PER_PX:");
+      replyClient->println(newDegPerPx, 4);
+    }
+  } else if (isCenterCommand(line)) {
+    if (fromTcp) lastTcpAliveMs = nowMs;
+    else lastUdpAliveMs = nowMs;
+    spawnPitchQ = pQ;
+    spawnYawQ   = yQ;
+    spawnSet    = true;
+    Serial.print("Center command applied: pitch=");
+    Serial.print(spawnPitchQ);
+    Serial.print(" yaw=");
+    Serial.println(spawnYawQ);
+    if (ENABLE_PACKET_ACK && replyClient) {
+      replyClient->println("ACK;CMD:CENTER");
+    }
+  } else {
+    String msg;
+    float x = 0.0f, y = 0.0f;
+
+    if (parsePacket(line, msg, x, y)) {
+      if (fromTcp) lastTcpAliveMs = nowMs;
+      else lastUdpAliveMs = nowMs;
+      // Target packet X/Y are offsets from the current device direction.
+      // X=0/Y=0 means the marker is centered at the current pose.
+      spawnPitchQ = pQ + quantizeDeg2((float)x);
+      spawnYawQ   = wrapAngle180i(yQ + quantizeDeg2((float)y));
+      spawnSet    = true;
+      if (ENABLE_PACKET_ACK && replyClient) {
+        replyClient->print("ACK;MSG:");
+        replyClient->print(msg);
+        replyClient->print(";X:");
+        replyClient->print(x, 2);
+        replyClient->print(";Y:");
+        replyClient->println(y, 2);
+      }
+    } else if (replyClient) {
+      replyClient->print("ERR;BAD_PACKET;");
+      replyClient->println(line);
+    }
+  }
+}
+
 void wifiConnectAndStartServer() {
   Serial.print("Starting AP: ");
   Serial.println(WIFI_SSID);
@@ -553,6 +704,10 @@ void wifiConnectAndStartServer() {
 
   server.begin();
   Serial.print("TCP server started on port ");
+  Serial.println(SERVER_PORT);
+
+  udp.begin(SERVER_PORT);
+  Serial.print("UDP server started on port ");
   Serial.println(SERVER_PORT);
 }
 
@@ -691,7 +846,7 @@ void setup() {
 
   tft.fillScreen(ILI9488_BLACK);
   drawCrossFull();
-  drawTCPStatus(false);
+  drawNetStatus(false, false);
   Serial.println("Target persistence disabled.");
 
   Wire.begin();
@@ -714,8 +869,8 @@ void setup() {
   delay(150);
 
   wifiConnectAndStartServer();
-  drawTCPStatus(false);
-  Serial.println("TCP status: WAIT.");
+  drawNetStatus(false, false);
+  Serial.println("NET status: WAIT.");
 }
 
 void loop() {
@@ -788,158 +943,42 @@ void loop() {
   if (tcpConnectedCached && client.available()) {
     uint32_t tcpReadStartUs = micros();
     String line = readLine(client);
-    line.trim();
-    if (line.length() > 0) {
-      float newDegPerPx = 0.0f;
-      float newFovXDeg = 0.0f;
-      float newFovYDeg = 0.0f;
-      uint32_t newTcpPollMs = 0;
-      int16_t newBoxSizePx = 0;
-      uint32_t newBoxRefreshMs = 0;
-      String msgOnly;
-      bool newBoxRenderEnabled = false;
-      bool newBoxDeltaRenderEnabled = false;
-
-      if (isPingCommand(line)) {
-        lastTcpAliveMs = nowMs;
-      } else if (parseMsgOnlyCommand(line, msgOnly)) {
-        lastTcpAliveMs = nowMs;
-        char msgBuf[48];
-        msgOnly.toCharArray(msgBuf, sizeof(msgBuf));
-        msgBuf[30] = '\0';
-        Serial.print("Msg updated: ");
-        Serial.println(msgBuf);
-        if (ENABLE_PACKET_ACK) {
-          client.print("ACK;MSGONLY:");
-          client.println(msgBuf);
-        }
-      } else if (parseDisplayFovXCommand(line, newFovXDeg)) {
-        lastTcpAliveMs = nowMs;
-        displayFovXDeg = newFovXDeg;
-        eraseOldBox();
-        Serial.print("Display FOV X updated: ");
-        Serial.println(displayFovXDeg, 2);
-        if (ENABLE_PACKET_ACK) {
-          client.print("ACK;CFG:FOV_X:");
-          client.println(displayFovXDeg, 2);
-        }
-      } else if (parseDisplayFovYCommand(line, newFovYDeg)) {
-        lastTcpAliveMs = nowMs;
-        displayFovYDeg = newFovYDeg;
-        eraseOldBox();
-        Serial.print("Display FOV Y updated: ");
-        Serial.println(displayFovYDeg, 2);
-        if (ENABLE_PACKET_ACK) {
-          client.print("ACK;CFG:FOV_Y:");
-          client.println(displayFovYDeg, 2);
-        }
-      } else if (parseTcpPollMsCommand(line, newTcpPollMs)) {
-        lastTcpAliveMs = nowMs;
-        tcpPollIntervalMs = newTcpPollMs;
-        Serial.print("TCP poll interval updated: ");
-        Serial.println(tcpPollIntervalMs);
-        if (ENABLE_PACKET_ACK) {
-          client.print("ACK;CFG:TCP_POLL_MS:");
-          client.println(tcpPollIntervalMs);
-        }
-      } else if (parseBoxSizeCommand(line, newBoxSizePx)) {
-        lastTcpAliveMs = nowMs;
-        boxSizePx = newBoxSizePx;
-        eraseOldBox();
-        Serial.print("Box size updated: ");
-        Serial.println(boxSizePx);
-      } else if (parseBoxRefreshMsCommand(line, newBoxRefreshMs)) {
-        lastTcpAliveMs = nowMs;
-        boxRefreshIntervalMs = newBoxRefreshMs;
-        Serial.print("Box refresh ms updated: ");
-        Serial.println(boxRefreshIntervalMs);
-      } else if (parseBoxRenderCommand(line, newBoxRenderEnabled)) {
-        lastTcpAliveMs = nowMs;
-        boxRenderEnabled = newBoxRenderEnabled;
-        if (!boxRenderEnabled) eraseOldBox();
-        Serial.print("Box render updated: ");
-        Serial.println(boxRenderEnabled ? "ON" : "OFF");
-      } else if (parseBoxDeltaRenderCommand(line, newBoxDeltaRenderEnabled)) {
-        lastTcpAliveMs = nowMs;
-        boxDeltaRenderEnabled = newBoxDeltaRenderEnabled;
-        Serial.print("Box delta render updated: ");
-        Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
-      } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
-        lastTcpAliveMs = nowMs;
-        displayFovXDeg = newDegPerPx * (float)SCREEN_W;
-        displayFovYDeg = newDegPerPx * (float)SCREEN_H;
-        eraseOldBox();
-        Serial.print("Legacy display deg/px converted to FOV X/Y: ");
-        Serial.print(displayFovXDeg, 2);
-        Serial.print("/");
-        Serial.println(displayFovYDeg, 2);
-        if (ENABLE_PACKET_ACK) {
-          client.print("ACK;CFG:DEG_PER_PX:");
-          client.println(newDegPerPx, 4);
-        }
-      } else if (isCenterCommand(line)) {
-        lastTcpAliveMs = nowMs;
-        spawnPitchQ = pQ;
-        spawnYawQ   = yQ;
-        spawnSet    = true;
-
-        Serial.print("Center command applied: pitch=");
-        Serial.print(spawnPitchQ);
-        Serial.print(" yaw=");
-        Serial.println(spawnYawQ);
-
-        if (ENABLE_PACKET_ACK) {
-          client.println("ACK;CMD:CENTER");
-        }
-      } else {
-        String msg;
-        float x = 0.0f, y = 0.0f;
-
-        if (parsePacket(line, msg, x, y)) {
-          lastTcpAliveMs = nowMs;
-          // Target packet X/Y are offsets from the current device direction.
-          // X=0/Y=0 means the marker is centered at the current pose.
-          spawnPitchQ = pQ + quantizeDeg2((float)x);
-          spawnYawQ   = wrapAngle180i(yQ + quantizeDeg2((float)y));
-          spawnSet    = true;
-
-          char msgBuf[48];
-          msg.toCharArray(msgBuf, sizeof(msgBuf));
-          msgBuf[30] = '\0';
-          Serial.println("Target updated.");
-
-          // ACK can be disabled to reduce Wi-Fi blocking latency.
-          if (ENABLE_PACKET_ACK) {
-            client.print("ACK;MSG:");
-            client.print(msg);
-            client.print(";X:");
-            client.print(x, 2);
-            client.print(";Y:");
-            client.println(y, 2);
-          }
-        } else {
-          client.print("ERR;BAD_PACKET;");
-          client.println(line);
-        }
-      }
-    }
+    processNetCommand(line, pQ, yQ, nowMs, &client);
     netReadUs = micros() - tcpReadStartUs;
   }
 
+  // ===== UDP read =====
+  int packetSize = udp.parsePacket();
+  if (packetSize > 0) {
+    uint32_t udpReadStartUs = micros();
+    char packet[257];
+    int len = udp.read(packet, sizeof(packet) - 1);
+    if (len > 0) {
+      packet[len] = '\0';
+      processNetCommand(String(packet), pQ, yQ, nowMs, nullptr);
+    }
+    netReadUs += micros() - udpReadStartUs;
+  }
+
   bool tcpConnected = tcpConnectedCached;
-  if (tcpConnected != lastTcpConnectedState) {
-    Serial.println(tcpConnected ? "TCP state -> OK" : "TCP state -> WAIT");
+  bool udpConnected = (lastUdpAliveMs != 0 && (nowMs - lastUdpAliveMs <= UDP_ALIVE_TIMEOUT_MS));
+  if (tcpConnected != lastTcpConnectedState || udpConnected != lastUdpConnectedState) {
+    Serial.print("NET state -> ");
+    if (tcpConnected) Serial.println("TCP OK");
+    else if (udpConnected) Serial.println("UDP OK");
+    else Serial.println("WAIT");
     lastTcpConnectedState = tcpConnected;
+    lastUdpConnectedState = udpConnected;
   }
 
   if (millis() - lastTcpStatusDrawMs >= TCP_STATUS_REFRESH_MS) {
-    drawTCPStatus(tcpConnected);
+    drawNetStatus(tcpConnected, udpConnected);
     lastTcpStatusDrawMs = millis();
   }
 
   // ===== BOX draw =====
-  int16_t targetPitchQ = spawnSet ? spawnPitchQ : 0;
-  int16_t targetYawQ   = spawnSet ? spawnYawQ : 0;
+  int16_t targetPitchQ = spawnSet ? spawnPitchQ : pQ;
+  int16_t targetYawQ   = spawnSet ? spawnYawQ : yQ;
   int16_t pitchRelQ = targetPitchQ - pQ;
   int16_t yawRelQ   = deltaAngle180i(targetYawQ, yQ);
 
@@ -950,7 +989,7 @@ void loop() {
     eraseOldBox();
   } else if (nowMs - lastBoxDrawMs >= boxRefreshIntervalMs) {
     uint32_t boxDrawStartUs = micros();
-    updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected);
+    updateBox(pitchRelQ, yawRelQ, onTarget, tcpConnected || udpConnected);
     lastBoxDrawMs = nowMs;
     boxDrawUs = micros() - boxDrawStartUs;
   }
@@ -984,8 +1023,10 @@ void loop() {
     Serial.print(boxSizePx);
     Serial.print(" box_cfg_refresh_ms=");
     Serial.print(boxRefreshIntervalMs);
-    Serial.print(" tcp=");
-    Serial.print(tcpConnected ? "OK" : "WAIT");
+    Serial.print(" net=");
+    if (tcpConnected) Serial.print("TCP");
+    else if (udpConnected) Serial.print("UDP");
+    else Serial.print("WAIT");
     Serial.print(" yaw=");
     Serial.print(yQ);
     Serial.print(" targetYaw=");

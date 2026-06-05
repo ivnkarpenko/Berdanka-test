@@ -26,17 +26,37 @@ circle_start_s = time.time()
 last_circle_send_s = 0.0
 
 
-class ArduinoTcpClient:
+class ArduinoClient:
     def __init__(self) -> None:
         self._sock: socket.socket | None = None
+        self._udp_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._logs: queue.Queue[str] = queue.Queue(maxsize=300)
         self._last_ping_s = 0.0
+        self._mode = "tcp"
+        self._remote: tuple[str, int] | None = None
 
-    def connect(self, host: str, port: int) -> str:
+    def connect(self, host: str, port: int, mode: str = "tcp") -> str:
         self.disconnect()
+        mode = "udp" if str(mode).lower() == "udp" else "tcp"
+        if mode == "udp":
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setblocking(False)
+            except Exception as exc:
+                return f"UDP CONNECT ERROR: {exc}"
+            with self._lock:
+                self._udp_sock = sock
+                self._remote = (host, port)
+                self._mode = "udp"
+            self.send_line("MSGONLY:CONNECTED_UDP")
+            self.send_line("PING")
+            self._last_ping_s = time.time()
+            self._log(f"UDP ready for {host}:{port}")
+            return "UDP READY"
+
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
@@ -48,6 +68,8 @@ class ArduinoTcpClient:
 
         with self._lock:
             self._sock = sock
+            self._mode = "tcp"
+            self._remote = (host, port)
 
         self._stop.clear()
         self._thread = threading.Thread(target=self._rx_loop, args=(sock,), daemon=True)
@@ -63,8 +85,11 @@ class ArduinoTcpClient:
         self._stop.set()
         with self._lock:
             sock = self._sock
+            udp_sock = self._udp_sock
             thread = self._thread
             self._sock = None
+            self._udp_sock = None
+            self._remote = None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -72,6 +97,11 @@ class ArduinoTcpClient:
                 pass
             try:
                 sock.close()
+            except Exception:
+                pass
+        if udp_sock is not None:
+            try:
+                udp_sock.close()
             except Exception:
                 pass
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
@@ -85,6 +115,22 @@ class ArduinoTcpClient:
             line += "\n"
         with self._lock:
             sock = self._sock
+            udp_sock = self._udp_sock
+            remote = self._remote
+            mode = self._mode
+        if mode == "udp":
+            if udp_sock is None or remote is None:
+                self._log("TX skipped: UDP not ready")
+                return False
+            try:
+                udp_sock.sendto(line.encode("utf-8"), remote)
+                if log_tx:
+                    self._log(f"UDP TX {line.strip()}")
+                return True
+            except Exception as exc:
+                self._log(f"UDP TX ERROR: {exc}")
+                self.disconnect()
+                return False
         if sock is None:
             self._log("TX skipped: not connected")
             return False
@@ -100,11 +146,15 @@ class ArduinoTcpClient:
 
     def is_connected(self) -> bool:
         with self._lock:
-            return self._sock is not None
+            return self._sock is not None or self._udp_sock is not None
+
+    def mode(self) -> str:
+        with self._lock:
+            return self._mode
 
     def heartbeat(self) -> None:
         with self._lock:
-            connected = self._sock is not None
+            connected = self._sock is not None or self._udp_sock is not None
         now = time.time()
         if connected and now - self._last_ping_s >= 1.0:
             if self.send_line("PING", log_tx=False):
@@ -197,7 +247,7 @@ def screen_projection(
     return x, y, yaw_rel, pitch_rel
 
 
-client = ArduinoTcpClient()
+client = ArduinoClient()
 app = Dash(__name__, update_title=None)
 
 
@@ -221,8 +271,9 @@ app.layout = html.Div(
                             [
                                 field("IP", dcc.Input(id="ip", value=DEFAULT_ARDUINO_IP, type="text")),
                                 field("Port", number_input("port", DEFAULT_ARDUINO_PORT, 1)),
+                                field("Transport", dcc.RadioItems(id="transport", options=[{"label": "UDP", "value": "udp"}, {"label": "TCP", "value": "tcp"}], value="udp", inline=True)),
                             ],
-                            className="grid2",
+                            className="grid3",
                         ),
                         html.Div([html.Button("Connect", id="connect"), html.Button("Disconnect", id="disconnect")], className="button-row"),
                         html.Div(id="connection-status", className="status"),
@@ -363,6 +414,7 @@ app.index_string = """
     Input("send-box-net", "n_clicks"),
     State("ip", "value"),
     State("port", "value"),
+    State("transport", "value"),
     State("target-msg", "value"),
     State("target-az", "value"),
     State("target-el", "value"),
@@ -384,6 +436,7 @@ def actions(
     _send_box_net: int | None,
     ip: str,
     port: int,
+    transport: str,
     target_msg: str,
     target_az: float,
     target_el: float,
@@ -399,7 +452,7 @@ def actions(
     flags = set(render_flags or [])
 
     if trigger == "connect":
-        client.connect(str(ip or DEFAULT_ARDUINO_IP), int(port or DEFAULT_ARDUINO_PORT))
+        client.connect(str(ip or DEFAULT_ARDUINO_IP), int(port or DEFAULT_ARDUINO_PORT), str(transport or "udp"))
     elif trigger == "disconnect":
         client.disconnect()
     elif trigger == "send-target":
@@ -484,7 +537,7 @@ def refresh(
     screen_x, screen_y, yaw_rel, pitch_rel = screen_projection(az, el, sw, sh, fx, fy)
     outside = screen_x < 0 or screen_x > sw or screen_y < 0 or screen_y > sh
 
-    status = "CONNECTED" if client.is_connected() else "DISCONNECTED"
+    status = f"{client.mode().upper()} " + ("READY" if client.is_connected() else "DISCONNECTED")
     if circle_active:
         status += " circle=ON"
 
