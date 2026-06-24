@@ -12,11 +12,11 @@ from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
 
 DEFAULT_ARDUINO_IP = "192.168.4.1"
 DEFAULT_ARDUINO_PORT = 3333
-DEFAULT_TARGET_RANGE_M = 300.0
+DEFAULT_TARGET_RANGE_M = 20.0
 DEFAULT_SCREEN_W = 480
 DEFAULT_SCREEN_H = 320
-DEFAULT_FOV_X_DEG = 60.0
-DEFAULT_FOV_Y_DEG = 80.0
+DEFAULT_FOV_X_DEG = 43.60
+DEFAULT_FOV_Y_DEG = 33.40
 DEFAULT_BOX_SIZE_PX = 50
 DEFAULT_BOX_REFRESH_MS = 33
 CIRCLE_SEND_INTERVAL_S = 0.2
@@ -286,7 +286,7 @@ app.layout = html.Div(
                         field("Message tag", dcc.Input(id="target-msg", value="JETSON", type="text", maxLength=30)),
                         field("Azimuth, deg", dcc.Slider(id="target-az", min=-180, max=180, step=1, value=0, marks={-180: "-180", 0: "0", 180: "180"})),
                         field("Elevation, deg", dcc.Slider(id="target-el", min=-90, max=90, step=1, value=0, marks={-90: "-90", 0: "0", 90: "90"})),
-                        field("Assumed range, m (XYZ only)", dcc.Slider(id="target-range", min=50, max=1000, step=10, value=DEFAULT_TARGET_RANGE_M, marks={100: "100", 300: "300", 600: "600", 1000: "1000"})),
+                        field("Assumed range, m (XYZ only)", dcc.Slider(id="target-range", min=5, max=1000, step=5, value=DEFAULT_TARGET_RANGE_M, marks={20: "20", 100: "100", 300: "300", 600: "600", 1000: "1000"})),
                         html.Div(
                             [
                                 html.Button("Send Target", id="send-target"),

@@ -37,6 +37,10 @@ PORT_DEFAULT = 3333
 WIFI_SSID = "cisco"
 WIFI_PASS = "cisco1234"
 HEARTBEAT_INTERVAL_S = 1.0
+DEFAULT_CAMERA_HFOV_DEG = 43.60
+DEFAULT_CAMERA_VFOV_DEG = 33.40
+DEFAULT_DISPLAY_FOV_X_DEG = DEFAULT_CAMERA_HFOV_DEG
+DEFAULT_DISPLAY_FOV_Y_DEG = DEFAULT_CAMERA_VFOV_DEG
 DEFAULT_YOLO_MODEL = "yolo11n.pt"
 QUADRO_YOLO_MODEL = "quadron_1280.onnx"
 QUADRO_YOLO_IMGSZ = 1280
@@ -68,12 +72,12 @@ class App:
         self.invert_x = tk.BooleanVar(value=False)
         self.invert_y = tk.BooleanVar(value=False)
         self.rate_hz = tk.IntVar(value=5)
-        self.hfov = tk.DoubleVar(value=90.0)
-        self.vfov = tk.DoubleVar(value=30.0)
+        self.hfov = tk.DoubleVar(value=DEFAULT_CAMERA_HFOV_DEG)
+        self.vfov = tk.DoubleVar(value=DEFAULT_CAMERA_VFOV_DEG)
         self.pitch_trim_deg = tk.DoubleVar(value=0.0)
         self.yaw_trim_deg = tk.DoubleVar(value=0.0)
-        self.display_fov_x_deg = tk.DoubleVar(value=60.0)
-        self.display_fov_y_deg = tk.DoubleVar(value=80.0)
+        self.display_fov_x_deg = tk.DoubleVar(value=DEFAULT_DISPLAY_FOV_X_DEG)
+        self.display_fov_y_deg = tk.DoubleVar(value=DEFAULT_DISPLAY_FOV_Y_DEG)
         self.tcp_poll_ms = tk.IntVar(value=250)
         self.box_size_px = tk.IntVar(value=50)
         self.box_refresh_ms = tk.IntVar(value=33)
@@ -368,8 +372,8 @@ class App:
             return None
 
         _, pitch, yaw, square = target
-        hfov = max(0.001, self.read_number_var(self.hfov, 90.0))
-        vfov = max(0.001, self.read_number_var(self.vfov, 30.0))
+        hfov = max(0.001, self.read_number_var(self.hfov, DEFAULT_CAMERA_HFOV_DEG))
+        vfov = max(0.001, self.read_number_var(self.vfov, DEFAULT_CAMERA_VFOV_DEG))
         ref_x = self.calibrated_center_norm[0] * frame_w
         ref_y = self.calibrated_center_norm[1] * frame_h
 
@@ -385,8 +389,8 @@ class App:
         return frame_x, frame_y, pitch, yaw, square
 
     def frame_point_to_target(self, frame_x, frame_y, frame_w, frame_h):
-        hfov = max(0.001, self.read_number_var(self.hfov, 90.0))
-        vfov = max(0.001, self.read_number_var(self.vfov, 30.0))
+        hfov = max(0.001, self.read_number_var(self.hfov, DEFAULT_CAMERA_HFOV_DEG))
+        vfov = max(0.001, self.read_number_var(self.vfov, DEFAULT_CAMERA_VFOV_DEG))
         ref_x = self.calibrated_center_norm[0] * frame_w
         ref_y = self.calibrated_center_norm[1] * frame_h
 
@@ -1122,8 +1126,8 @@ class App:
                 elif self.send_enabled.get() and self.sock and self.last_det_center is not None:
                     if (now - self.last_send_ts) >= interval:
                         cx, cy = self.last_det_center
-                        hfov = max(0.001, self.read_number_var(self.hfov, 90.0))
-                        vfov = max(0.001, self.read_number_var(self.vfov, 30.0))
+                        hfov = max(0.001, self.read_number_var(self.hfov, DEFAULT_CAMERA_HFOV_DEG))
+                        vfov = max(0.001, self.read_number_var(self.vfov, DEFAULT_CAMERA_VFOV_DEG))
                         ref_x = self.calibrated_center_norm[0] * fw
                         ref_y = self.calibrated_center_norm[1] * fh
                         angle_x = ((cx - ref_x) / max(1, fw)) * hfov

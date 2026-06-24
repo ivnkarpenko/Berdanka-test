@@ -26,8 +26,8 @@ constexpr int16_t CX = SCREEN_W / 2;
 constexpr int16_t CY = SCREEN_H / 2;
 
 // ================== UI ==================
-constexpr float   DEFAULT_FOV_X_DEG = 60.0f;
-constexpr float   DEFAULT_FOV_Y_DEG = 80.0f;
+constexpr float   DEFAULT_FOV_X_DEG = 43.60f;
+constexpr float   DEFAULT_FOV_Y_DEG = 33.40f;
 constexpr int16_t DEFAULT_BOX_SIZE   = 50;
 constexpr int16_t ANGLE_STEP_DEG = 2;
 constexpr int16_t TARGET_TOL_DEG = 6;
