@@ -106,6 +106,18 @@ void loop() {
   int16_t pitchRelQ = targetPitchQ - pQ;
   int16_t yawRelQ   = deltaAngle180i(targetYawQ, yQ);
 
+  // A target exactly behind the zero basis is ambiguous: +180 and -180 are the
+  // same physical direction. Hold the last side near that singularity so sensor
+  // noise does not draw alternating boxes on opposite screen edges.
+  static int16_t lastYawRelSideQ = 180;
+  constexpr int16_t REAR_AMBIGUITY_HOLD_DEG = 6;
+  int16_t yawAbsQ = abs((int)yawRelQ);
+  if ((180 - yawAbsQ) <= REAR_AMBIGUITY_HOLD_DEG) {
+    yawRelQ = (lastYawRelSideQ < 0) ? -180 : 180;
+  } else if (yawRelQ != 0) {
+    lastYawRelSideQ = yawRelQ;
+  }
+
   bool onTarget = (abs((int)pitchRelQ) <= TARGET_TOL_DEG) &&
                   (abs((int)yawRelQ)   <= TARGET_TOL_DEG);
 

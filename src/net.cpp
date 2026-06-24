@@ -365,10 +365,10 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     if (parsePacket(line, msg, x, y)) {
       if (fromTcp) lastTcpAliveMs = nowMs;
       else lastUdpAliveMs = nowMs;
-      // Target packet X/Y are offsets from the current device direction.
-      // X=0/Y=0 means the marker is centered at the current pose.
-      spawnPitchQ = pQ + quantizeDeg2((float)x);
-      spawnYawQ   = wrapAngle180i(yQ + quantizeDeg2((float)y));
+      // Target packet X/Y are offsets from the zero basis captured after
+      // the 15-second IMU warmup. Re-sending the same packet must be idempotent.
+      spawnPitchQ = quantizeDeg2((float)x);
+      spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
       spawnSet    = true;
       if (ENABLE_PACKET_ACK && replyClient) {
         replyClient->print("ACK;MSG:");
