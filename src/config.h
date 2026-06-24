@@ -26,6 +26,9 @@ constexpr int16_t CX = SCREEN_W / 2;
 constexpr int16_t CY = SCREEN_H / 2;
 
 // ================== UI ==================
+// Camera calibration target: 640x480 IMX477 1/2" 4:3 with an 8 mm lens.
+// The full camera frame is normalized onto the full 480x320 TFT:
+// display_x = camera_x * 480/640, display_y = camera_y * 320/480.
 constexpr float   DEFAULT_FOV_X_DEG = 43.60f;
 constexpr float   DEFAULT_FOV_Y_DEG = 33.40f;
 constexpr int16_t DEFAULT_BOX_SIZE   = 50;

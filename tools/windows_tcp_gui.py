@@ -28,8 +28,12 @@ PORT_DEFAULT = 3333
 WIFI_SSID = "cisco"
 WIFI_PASS = "cisco1234"
 HEARTBEAT_INTERVAL_S = 1.0
+DEFAULT_CAMERA_FRAME_W = 640
+DEFAULT_CAMERA_FRAME_H = 480
 DEFAULT_CAMERA_HFOV_DEG = 43.60
 DEFAULT_CAMERA_VFOV_DEG = 33.40
+# Full camera frame is normalized onto the full 480x320 Arduino display:
+# display_x = camera_x * 480/640, display_y = camera_y * 320/480.
 DEFAULT_DISPLAY_FOV_X_DEG = DEFAULT_CAMERA_HFOV_DEG
 DEFAULT_DISPLAY_FOV_Y_DEG = DEFAULT_CAMERA_VFOV_DEG
 DEFAULT_YOLO_MODEL = "yolo11n.pt"
@@ -617,6 +621,11 @@ class App:
             self.cap = None
             messagebox.showwarning("Camera", "Cannot open camera.")
             return
+        try:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, DEFAULT_CAMERA_FRAME_W)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DEFAULT_CAMERA_FRAME_H)
+        except Exception:
+            pass
 
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
