@@ -82,6 +82,11 @@ void loop() {
       roll = 0.0f;
       pitch = 0.0f;
       yaw = 0.0f;
+      targetBasisPitchQ = 0;
+      targetBasisYawQ = 0;
+      spawnPitchQ = targetBasisPitchQ;
+      spawnYawQ = targetBasisYawQ;
+      spawnSet = true;
     } else {
       return;
     }

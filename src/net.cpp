@@ -348,13 +348,15 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
   } else if (isCenterCommand(line)) {
     if (fromTcp) lastTcpAliveMs = nowMs;
     else lastUdpAliveMs = nowMs;
-    spawnPitchQ = pQ;
-    spawnYawQ   = yQ;
+    targetBasisPitchQ = pQ;
+    targetBasisYawQ = yQ;
+    spawnPitchQ = targetBasisPitchQ;
+    spawnYawQ = targetBasisYawQ;
     spawnSet    = true;
-    Serial.print("Center command applied: pitch=");
-    Serial.print(spawnPitchQ);
+    Serial.print("Target basis recentered: pitch=");
+    Serial.print(targetBasisPitchQ);
     Serial.print(" yaw=");
-    Serial.println(spawnYawQ);
+    Serial.println(targetBasisYawQ);
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->println("ACK;CMD:CENTER");
     }
@@ -365,10 +367,11 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     if (parsePacket(line, msg, x, y)) {
       if (fromTcp) lastTcpAliveMs = nowMs;
       else lastUdpAliveMs = nowMs;
-      // Target packet X/Y are offsets from the zero basis captured after
-      // the 15-second IMU warmup. Re-sending the same packet must be idempotent.
-      spawnPitchQ = quantizeDeg2((float)x);
-      spawnYawQ   = wrapAngle180i(quantizeDeg2((float)y));
+      // Target packet X/Y are offsets from the active basis. Startup basis is
+      // captured after the 15-second IMU warmup; CMD:CENTER can recenter it.
+      // Re-sending the same packet must be idempotent.
+      spawnPitchQ = targetBasisPitchQ + quantizeDeg2((float)x);
+      spawnYawQ   = wrapAngle180i(targetBasisYawQ + quantizeDeg2((float)y));
       spawnSet    = true;
       if (ENABLE_PACKET_ACK && replyClient) {
         replyClient->print("ACK;MSG:");

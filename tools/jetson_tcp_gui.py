@@ -8,6 +8,7 @@ from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk
 import time
+import math
 import base64
 
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
@@ -93,6 +94,11 @@ class App:
         self.manual_target_pitch_deg = tk.StringVar(value="0.00")
         self.manual_target_square_px = tk.StringVar(value="18")
         self.manual_target_msg = tk.StringVar(value="JETSON")
+        self.circle_target_enabled = tk.BooleanVar(value=False)
+        self.circle_radius_yaw_deg = tk.StringVar(value="10.00")
+        self.circle_radius_pitch_deg = tk.StringVar(value="10.00")
+        self.circle_period_s = tk.StringVar(value="8.00")
+        self.circle_send_hz = tk.StringVar(value="10")
         self.yolo_model = None
         self.yolo_backend = None
         self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
@@ -114,6 +120,8 @@ class App:
         self.hold_until = 0.0
         self.hold_frame = None
         self.last_manual_send_ts = 0.0
+        self.circle_start_ts = time.time()
+        self.last_circle_send_ts = 0.0
         self.camera_view = None
 
         self.build_ui()
@@ -224,13 +232,29 @@ class App:
         tk.Checkbutton(tab_target, text="Auto-send target", variable=self.manual_target_auto_send).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=3
         )
+
+        tk.Checkbutton(tab_target, text="Circle test around 0/0", variable=self.circle_target_enabled,
+                       command=self.reset_circle_test).grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(10, 3)
+        )
+
+        for row, label, var in (
+            (8, "Circle yaw deg", self.circle_radius_yaw_deg),
+            (9, "Circle pitch deg", self.circle_radius_pitch_deg),
+            (10, "Period sec", self.circle_period_s),
+            (11, "Send Hz", self.circle_send_hz),
+        ):
+            tk.Label(tab_target, text=label).grid(row=row, column=0, sticky="e", pady=3)
+            tk.Entry(tab_target, textvariable=var, width=8, validate="key",
+                     validatecommand=vcmd).grid(row=row, column=1, sticky="w", padx=6, pady=3)
+
         tk.Label(
             tab_target,
             text="Click inside the camera image to place the target from camera FOV.",
             wraplength=280,
             justify="left",
             fg="#555",
-        ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ).grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
         # Vision tab
         tk.Checkbutton(tab_vision, text="YOLO detection", variable=self.yolo_enabled).grid(row=0, column=0, columnspan=2, sticky="w")
@@ -369,6 +393,47 @@ class App:
         msg, pitch, yaw, _ = target
         line = f"MSG:{msg};X:{pitch:.2f};Y:{yaw:.2f}\n"
         return self.send_line(line, warn_title=warn_title, log_tx=log_tx)
+
+    def reset_circle_test(self):
+        self.circle_start_ts = time.time()
+        self.last_circle_send_ts = 0.0
+
+    def read_circle_config(self):
+        try:
+            yaw_radius = abs(float(str(self.circle_radius_yaw_deg.get()).strip() or "0"))
+            pitch_radius = abs(float(str(self.circle_radius_pitch_deg.get()).strip() or "0"))
+            period_s = float(str(self.circle_period_s.get()).strip() or "8")
+            send_hz = float(str(self.circle_send_hz.get()).strip() or "10")
+        except Exception:
+            return None
+
+        yaw_radius = self.clamp(yaw_radius, 0.0, 180.0)
+        pitch_radius = self.clamp(pitch_radius, 0.0, 90.0)
+        period_s = self.clamp(period_s, 0.2, 120.0)
+        send_hz = self.clamp(send_hz, 1.0, 30.0)
+        return yaw_radius, pitch_radius, period_s, send_hz
+
+    def update_circle_target(self, now):
+        if not self.circle_target_enabled.get():
+            return False
+
+        cfg = self.read_circle_config()
+        if cfg is None:
+            self.lb_target_status.configure(text="Circle invalid")
+            return True
+
+        yaw_radius, pitch_radius, period_s, send_hz = cfg
+        theta = ((now - self.circle_start_ts) / period_s) * 2.0 * math.pi
+        yaw = yaw_radius * math.cos(theta)
+        pitch = pitch_radius * math.sin(theta)
+        self.manual_target_yaw_deg.set(f"{yaw:.2f}")
+        self.manual_target_pitch_deg.set(f"{pitch:.2f}")
+
+        interval = 1.0 / send_hz
+        if self.sock and (now - self.last_circle_send_ts) >= interval:
+            if self.send_manual_target(log_tx=False, warn_invalid=False):
+                self.last_circle_send_ts = now
+        return True
 
     def target_to_frame_point(self, frame_w, frame_h):
         target = self.read_manual_target(warn_invalid=False)
@@ -582,8 +647,10 @@ class App:
 
         self.manual_target_pitch_deg.set("0.00")
         self.manual_target_yaw_deg.set("0.00")
-        if self.send_manual_target(warn_title="Centering"):
+        self.reset_circle_test()
+        if self.send_line("CMD:CENTER\n", warn_title="Centering"):
             self.last_manual_send_ts = time.time()
+            self.log("[CAL] Arduino target basis recentered.")
 
     def send_display_config(self):
         try:
@@ -1102,13 +1169,15 @@ class App:
             return frame
 
     def update_camera(self):
+        now = time.time()
+        circle_active = self.update_circle_target(now)
+
         if self.camera_running and self.cap:
             ret, frame = self.cap.read()
             if ret:
                 fh, fw = frame.shape[:2]
                 self.lb_res.configure(text=f"Res: {fw}x{fh}")
                 self.last_frame = frame
-                now = time.time()
                 interval = 1.0 / max(1, int(self.rate_hz.get()))
 
                 if self.single_request:
@@ -1125,7 +1194,9 @@ class App:
                 elif self.hold_frame is not None and now >= self.hold_until:
                     self.hold_frame = None
 
-                if self.manual_target_auto_send.get() and self.sock:
+                if circle_active:
+                    pass
+                elif self.manual_target_auto_send.get() and self.sock:
                     if (now - self.last_manual_send_ts) >= interval:
                         if self.send_manual_target(log_tx=False, warn_invalid=False):
                             self.last_manual_send_ts = now

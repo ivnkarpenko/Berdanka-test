@@ -41,6 +41,8 @@ extern int16_t spawnPitchQ;
 extern int16_t spawnYawQ;
 extern bool    spawnSet;
 extern bool    lockTargetToCurrentFrame;
+extern int16_t targetBasisPitchQ;
+extern int16_t targetBasisYawQ;
 
 extern bool     lastBoxValid;
 extern int16_t  lastBoxX;

@@ -34,6 +34,8 @@ int16_t spawnPitchQ = 0;
 int16_t spawnYawQ   = 0;
 bool    spawnSet    = false;
 bool    lockTargetToCurrentFrame = false;
+int16_t targetBasisPitchQ = 0;
+int16_t targetBasisYawQ = 0;
 
 bool     lastBoxValid = false;
 int16_t  lastBoxX = 0;
