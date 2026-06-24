@@ -53,7 +53,7 @@ screen_y = CY - elevation_offset_deg * px_per_deg_y
 - `platformio.ini` - сборка PlatformIO для `uno_r4_wifi`.
 - `lib/ILI9488/` - локальная библиотека дисплея.
 - `tools/windows_tcp_gui.py` - TCP GUI для Windows.
-- `tools/jetson_tcp_gui.py` - TCP GUI для Linux/Jetson без DeepStream.
+- `tools/jetson_tcp_gui.py` - TCP GUI для Linux/Jetson с камерой, YOLO и ручной целью.
 - `tools/jetson_wifi_visualize.py` - легкая Jetson Linux control panel без графиков: цель, настройки и круговая проверка движения маркера.
 - `tools/yolo11n.pt` - опциональная локальная YOLO-модель для GUI.
 - `tools/quadron_1280.onnx` - опциональная ONNX-модель для GUI.
@@ -140,3 +140,8 @@ python3 tools/jetson_wifi_visualize.py
 
 GUI умеют подключаться к AP Arduino, отправлять ручные углы, менять FOV экрана
 и опционально использовать камеру/YOLO для автопередачи смещения цели.
+В Jetson TCP GUI камера находится в изменяемой панели: потяните разделитель
+между вкладками и изображением, чтобы менять размер preview. Во вкладке `Target`
+можно задать `X`/`Y`, размер квадрата на камере, отправить цель вручную,
+включить автопосылку или кликнуть по изображению камеры, чтобы выставить цель
+по текущим `HFOV/VFOV`, `trim` и `invert` настройкам.
