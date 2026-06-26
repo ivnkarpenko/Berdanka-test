@@ -4,12 +4,14 @@ import subprocess
 import queue
 import tkinter as tk
 import os
+import tempfile
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk
 import time
 import math
 import base64
+from xml.sax.saxutils import escape as xml_escape
 
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
@@ -58,7 +60,9 @@ MODEL_PRESETS = {
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Jetson <-> Arduino UNO R4 WiFi")
+        self.is_windows = os.name == "nt"
+        host_title = "Windows" if self.is_windows else "Jetson"
+        self.root.title(f"{host_title} <-> Arduino UNO R4 WiFi")
         self.root.geometry("920x640")
         self.root.minsize(720, 500)
 
@@ -109,11 +113,51 @@ class App:
         self.yolo_predict_imgsz = 640
         self.yolo_status = "YOLO: idle"
         self.last_yolo_log_ts = 0.0
+        self.contrast_enabled = tk.BooleanVar(value=False)
+        self.contrast_send_enabled = tk.BooleanVar(value=False)
+        self.contrast_threshold = tk.IntVar(value=35)
+        self.contrast_blur_px = tk.IntVar(value=3)
+        self.contrast_dilate_px = tk.IntVar(value=5)
+        self.contrast_min_area_px = tk.IntVar(value=80)
+        self.contrast_max_area_px = tk.IntVar(value=40000)
+        self.contrast_min_box_px = tk.IntVar(value=6)
+        self.contrast_lock_radius_px = tk.IntVar(value=80)
+        self.contrast_max_jump_px = tk.IntVar(value=160)
+        self.contrast_switch_margin = tk.DoubleVar(value=1.35)
+        self.contrast_smoothing = tk.DoubleVar(value=0.25)
+        self.contrast_hold_ms = tk.IntVar(value=250)
+        self.contrast_status = "Contrast: idle"
+        self.last_contrast_log_ts = 0.0
+        self.orb_enabled = tk.BooleanVar(value=False)
+        self.orb_send_enabled = tk.BooleanVar(value=False)
+        self.orb_nfeatures = tk.IntVar(value=500)
+        self.orb_fast_threshold = tk.IntVar(value=20)
+        self.orb_edge_threshold = tk.IntVar(value=31)
+        self.orb_min_response = tk.DoubleVar(value=0.0005)
+        self.orb_lock_radius_px = tk.IntVar(value=80)
+        self.orb_max_jump_px = tk.IntVar(value=160)
+        self.orb_switch_margin = tk.DoubleVar(value=1.40)
+        self.orb_smoothing = tk.DoubleVar(value=0.35)
+        self.orb_hold_ms = tk.IntVar(value=300)
+        self.orb_status = "ORB: idle"
+        self.last_orb_log_ts = 0.0
         self.last_frame = None
         self.last_det = None
         self.last_det_center = None
+        self.last_contrast_det = None
+        self.last_contrast_center = None
+        self.last_contrast_seen_ts = 0.0
+        self.contrast_smoothed_center = None
+        self.contrast_locked_score = 0.0
+        self.last_orb_point = None
+        self.last_orb_seen_ts = 0.0
+        self.orb_smoothed_point = None
+        self.orb_locked_score = 0.0
+        self.orb_locked_response = 0.0
         self.calibrated_center_norm = (0.5, 0.5)
         self.last_det_ts = 0.0
+        self.last_contrast_ts = 0.0
+        self.last_orb_ts = 0.0
         self.last_send_ts = 0.0
         self.last_heartbeat_ts = 0.0
         self.single_request = False
@@ -154,16 +198,21 @@ class App:
         tab_link = tk.Frame(notebook, padx=8, pady=8)
         tab_target = tk.Frame(notebook, padx=8, pady=8)
         tab_vision = tk.Frame(notebook, padx=8, pady=8)
+        tab_contrast = tk.Frame(notebook, padx=8, pady=8)
+        tab_orb = tk.Frame(notebook, padx=8, pady=8)
         tab_cfg = tk.Frame(notebook, padx=8, pady=8)
         tab_log = tk.Frame(notebook, padx=6, pady=6)
         for tab, title in (
             (tab_link, "Link"),
             (tab_target, "Target"),
             (tab_vision, "Vision"),
+            (tab_contrast, "Contrast"),
+            (tab_orb, "ORB"),
             (tab_cfg, "Config"),
             (tab_log, "Log"),
         ):
             tab.grid_columnconfigure(1, weight=1)
+            tab.grid_columnconfigure(2, weight=1)
             notebook.add(tab, text=title)
 
         # Link tab
@@ -177,7 +226,8 @@ class App:
         self.ed_pass.insert(0, WIFI_PASS)
         self.ed_pass.grid(row=1, column=1, sticky="ew", padx=6, pady=3)
 
-        self.bt_wifi = tk.Button(tab_link, text="Connect Wi-Fi", command=self.connect_wifi_linux)
+        wifi_text = "Connect Wi-Fi (netsh)" if self.is_windows else "Connect Wi-Fi (nmcli)"
+        self.bt_wifi = tk.Button(tab_link, text=wifi_text, command=self.connect_wifi)
         self.bt_wifi.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 12))
 
         tk.Label(tab_link, text="Arduino IP").grid(row=3, column=0, sticky="e", pady=3)
@@ -296,6 +346,70 @@ class App:
 
         tk.Checkbutton(tab_vision, text="Invert X", variable=self.invert_x).grid(row=13, column=0, sticky="w", pady=(8, 0))
         tk.Checkbutton(tab_vision, text="Invert Y", variable=self.invert_y).grid(row=13, column=1, sticky="w", pady=(8, 0))
+
+        # Contrast tab
+        tk.Checkbutton(tab_contrast, text="Включить контрастный захват", variable=self.contrast_enabled).grid(
+            row=0, column=0, columnspan=3, sticky="w"
+        )
+        tk.Checkbutton(tab_contrast, text="Отправлять точку на Arduino", variable=self.contrast_send_enabled).grid(
+            row=1, column=0, columnspan=3, sticky="w"
+        )
+        self.lb_contrast_status = tk.Label(tab_contrast, text=self.contrast_status, anchor="w", justify="left", fg="#225588")
+        self.lb_contrast_status.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+
+        for row, label, var, width, help_text in (
+            (3, "Порог", self.contrast_threshold, 6, "Насколько сильным должен быть перепад яркости."),
+            (4, "Размытие px", self.contrast_blur_px, 6, "Снижает шум; нечетное число, 1 почти без фильтра."),
+            (5, "Склейка px", self.contrast_dilate_px, 6, "Объединяет близкие контрастные пиксели в одну область."),
+            (6, "Мин. площадь", self.contrast_min_area_px, 7, "Отсекает мелкие шумовые области."),
+            (7, "Макс. площадь", self.contrast_max_area_px, 7, "Отсекает слишком большие фоновые области."),
+            (8, "Мин. размер", self.contrast_min_box_px, 6, "Минимальная ширина и высота области в пикселях."),
+            (9, "Радиус lock", self.contrast_lock_radius_px, 6, "В этом радиусе предпочитается старая область."),
+            (10, "Макс. скачок", self.contrast_max_jump_px, 6, "Дальше этого новая область игнорируется."),
+            (11, "Перекл. x", self.contrast_switch_margin, 6, "Новая дальняя область должна быть сильнее во столько раз."),
+            (12, "Сглаживание", self.contrast_smoothing, 6, "0 - быстро, 0.95 - очень плавно, но с задержкой."),
+            (13, "Удержание ms", self.contrast_hold_ms, 6, "Резервный параметр; метка держится до Reset."),
+        ):
+            tk.Label(tab_contrast, text=label).grid(row=row, column=0, sticky="e", pady=3)
+            tk.Entry(tab_contrast, width=width, textvariable=var).grid(row=row, column=1, sticky="w", padx=6, pady=3)
+            tk.Label(tab_contrast, text=help_text, wraplength=155, justify="left", fg="#555").grid(
+                row=row, column=2, sticky="w", pady=3
+            )
+
+        tk.Button(tab_contrast, text="Reset contrast track", command=self.reset_contrast_track).grid(
+            row=14, column=0, columnspan=3, sticky="ew", pady=(8, 0)
+        )
+
+        # ORB tab
+        tk.Checkbutton(tab_orb, text="Включить ORB захват", variable=self.orb_enabled).grid(
+            row=0, column=0, columnspan=3, sticky="w"
+        )
+        tk.Checkbutton(tab_orb, text="Отправлять точку на Arduino", variable=self.orb_send_enabled).grid(
+            row=1, column=0, columnspan=3, sticky="w"
+        )
+        self.lb_orb_status = tk.Label(tab_orb, text=self.orb_status, anchor="w", justify="left", fg="#225588")
+        self.lb_orb_status.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+
+        for row, label, var, width, help_text in (
+            (3, "Точек ORB", self.orb_nfeatures, 6, "Сколько keypoint искать до выбора одной лучшей."),
+            (4, "FAST порог", self.orb_fast_threshold, 6, "Выше - меньше точек, но они контрастнее."),
+            (5, "Край px", self.orb_edge_threshold, 6, "Не брать точки слишком близко к краю кадра."),
+            (6, "Мин. response", self.orb_min_response, 7, "Минимальная сила ORB-точки."),
+            (7, "Радиус lock", self.orb_lock_radius_px, 6, "В этом радиусе предпочитается старая цель."),
+            (8, "Макс. скачок", self.orb_max_jump_px, 6, "Дальше этого новая точка игнорируется."),
+            (9, "Перекл. x", self.orb_switch_margin, 6, "Новая дальняя точка должна быть сильнее во столько раз."),
+            (10, "Сглаживание", self.orb_smoothing, 6, "0 - быстро, 0.95 - плавно, но с задержкой."),
+            (11, "Удержание ms", self.orb_hold_ms, 6, "Резервный параметр; метка держится до Reset."),
+        ):
+            tk.Label(tab_orb, text=label).grid(row=row, column=0, sticky="e", pady=3)
+            tk.Entry(tab_orb, width=width, textvariable=var).grid(row=row, column=1, sticky="w", padx=6, pady=3)
+            tk.Label(tab_orb, text=help_text, wraplength=155, justify="left", fg="#555").grid(
+                row=row, column=2, sticky="w", pady=3
+            )
+
+        tk.Button(tab_orb, text="Reset ORB track", command=self.reset_orb_track).grid(
+            row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0)
+        )
 
         # Config tab
         for row, label, var in (
@@ -536,6 +650,107 @@ class App:
         self.log_view.insert("end", s + "\n")
         self.log_view.see("end")
 
+    def connect_wifi(self):
+        if self.is_windows:
+            self.connect_wifi_windows()
+        else:
+            self.connect_wifi_linux()
+
+    def connect_wifi_windows(self):
+        ssid = self.ed_ssid.get().strip()
+        pw = self.ed_pass.get()
+
+        if not ssid:
+            messagebox.showwarning("Wi-Fi", "SSID is empty.")
+            return
+
+        ssid_xml = xml_escape(ssid)
+        pw_xml = xml_escape(pw)
+        if pw:
+            security_xml = f"""
+        <security>
+            <authEncryption>
+                <authentication>WPA2PSK</authentication>
+                <encryption>AES</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+            <sharedKey>
+                <keyType>passPhrase</keyType>
+                <protected>false</protected>
+                <keyMaterial>{pw_xml}</keyMaterial>
+            </sharedKey>
+        </security>"""
+        else:
+            security_xml = """
+        <security>
+            <authEncryption>
+                <authentication>open</authentication>
+                <encryption>none</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+        </security>"""
+
+        profile_xml = f"""<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{ssid_xml}</name>
+    <SSIDConfig>
+        <SSID>
+            <name>{ssid_xml}</name>
+        </SSID>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <MSM>{security_xml}
+    </MSM>
+</WLANProfile>"""
+
+        profile_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, encoding="utf-8") as f:
+                profile_path = f.name
+                f.write(profile_xml)
+
+            self.log("[WIFI] netsh wlan add profile")
+            add = subprocess.run(
+                ["netsh", "wlan", "add", "profile", f"filename={profile_path}"],
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+            if add.stdout.strip():
+                self.log(add.stdout.strip())
+            if add.stderr.strip():
+                self.log(add.stderr.strip())
+            if add.returncode != 0:
+                messagebox.showwarning("Wi-Fi", "netsh add profile failed. Try connecting via Windows UI.")
+                return
+
+            self.log(f"[WIFI] netsh wlan connect name={ssid}")
+            connect = subprocess.run(
+                ["netsh", "wlan", "connect", f"name={ssid}"],
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+            if connect.stdout.strip():
+                self.log(connect.stdout.strip())
+            if connect.stderr.strip():
+                self.log(connect.stderr.strip())
+            if connect.returncode == 0:
+                self.log("[WIFI] Connect command sent OK.")
+            else:
+                messagebox.showwarning("Wi-Fi", "netsh connect failed. Try connecting via Windows UI.")
+        except FileNotFoundError:
+            messagebox.showwarning("Wi-Fi", "netsh not found. Run this GUI from Windows, or connect via system UI.")
+        except subprocess.TimeoutExpired:
+            messagebox.showwarning("Wi-Fi", "netsh timeout.")
+        finally:
+            if profile_path:
+                try:
+                    os.unlink(profile_path)
+                except Exception:
+                    pass
+
     def connect_wifi_linux(self):
         ssid = self.ed_ssid.get().strip()
         pw = self.ed_pass.get()
@@ -632,15 +847,25 @@ class App:
         if self.send_manual_target(warn_title="Send"):
             self.last_manual_send_ts = time.time()
 
+    def get_active_detection_center(self):
+        if self.contrast_enabled.get() and self.last_contrast_center is not None:
+            return "contrast", self.last_contrast_center
+        if self.orb_enabled.get() and self.last_orb_point is not None:
+            return "ORB", self.last_orb_point
+        if self.yolo_enabled.get() and self.last_det_center is not None:
+            return "YOLO", self.last_det_center
+        return None, None
+
     def send_center_command(self):
-        if self.last_frame is not None and self.last_det_center is not None:
+        source, center = self.get_active_detection_center()
+        if self.last_frame is not None and center is not None:
             fh, fw = self.last_frame.shape[:2]
-            cx, cy = self.last_det_center
+            cx, cy = center
             self.calibrated_center_norm = (
                 cx / max(1, fw),
                 cy / max(1, fh),
             )
-            self.log(f"[CAL] Vision center set from detection: {cx},{cy}")
+            self.log(f"[CAL] Vision center set from {source}: {int(round(cx))},{int(round(cy))}")
         else:
             self.calibrated_center_norm = (0.5, 0.5)
             self.log("[CAL] Vision center set to geometric frame center.")
@@ -909,6 +1134,475 @@ class App:
 
     def single_detect(self):
         self.single_request = True
+
+    def set_contrast_status(self, text):
+        self.contrast_status = text
+        if hasattr(self, "lb_contrast_status"):
+            self.lb_contrast_status.configure(text=text)
+
+    def set_orb_status(self, text):
+        self.orb_status = text
+        if hasattr(self, "lb_orb_status"):
+            self.lb_orb_status.configure(text=text)
+
+    def reset_contrast_track(self):
+        self.last_contrast_det = None
+        self.last_contrast_center = None
+        self.last_contrast_seen_ts = 0.0
+        self.contrast_smoothed_center = None
+        self.contrast_locked_score = 0.0
+        self.set_contrast_status("Contrast: reset")
+        self.log("[CONTRAST] Track reset.")
+
+    def reset_orb_track(self):
+        self.last_orb_point = None
+        self.last_orb_seen_ts = 0.0
+        self.orb_smoothed_point = None
+        self.orb_locked_score = 0.0
+        self.orb_locked_response = 0.0
+        self.set_orb_status("ORB: reset")
+        self.log("[ORB] Track reset.")
+
+    def get_contrast_config(self):
+        try:
+            threshold = int(float(self.contrast_threshold.get()))
+        except Exception:
+            threshold = 35
+        try:
+            blur_px = int(float(self.contrast_blur_px.get()))
+        except Exception:
+            blur_px = 3
+        try:
+            dilate_px = int(float(self.contrast_dilate_px.get()))
+        except Exception:
+            dilate_px = 5
+        try:
+            min_area = int(float(self.contrast_min_area_px.get()))
+        except Exception:
+            min_area = 80
+        try:
+            max_area = int(float(self.contrast_max_area_px.get()))
+        except Exception:
+            max_area = 40000
+        try:
+            min_box_px = int(float(self.contrast_min_box_px.get()))
+        except Exception:
+            min_box_px = 6
+        try:
+            lock_radius_px = int(float(self.contrast_lock_radius_px.get()))
+        except Exception:
+            lock_radius_px = 80
+        try:
+            max_jump_px = int(float(self.contrast_max_jump_px.get()))
+        except Exception:
+            max_jump_px = 160
+        try:
+            switch_margin = float(self.contrast_switch_margin.get())
+        except Exception:
+            switch_margin = 1.35
+        try:
+            smoothing = float(self.contrast_smoothing.get())
+        except Exception:
+            smoothing = 0.25
+        try:
+            hold_ms = int(float(self.contrast_hold_ms.get()))
+        except Exception:
+            hold_ms = 250
+
+        threshold = int(self.clamp(threshold, 1, 255))
+        blur_px = int(self.clamp(blur_px, 1, 51))
+        if blur_px > 1 and blur_px % 2 == 0:
+            blur_px += 1
+        dilate_px = int(self.clamp(dilate_px, 0, 51))
+        if dilate_px > 1 and dilate_px % 2 == 0:
+            dilate_px += 1
+        min_area = int(self.clamp(min_area, 1, 1000000))
+        max_area = int(self.clamp(max_area, min_area, 2000000))
+        min_box_px = int(self.clamp(min_box_px, 1, 1000))
+        lock_radius_px = int(self.clamp(lock_radius_px, 0, 2000))
+        max_jump_px = int(self.clamp(max_jump_px, 0, 4000))
+        switch_margin = self.clamp(switch_margin, 1.0, 20.0)
+        smoothing = self.clamp(smoothing, 0.0, 0.95)
+        hold_ms = int(self.clamp(hold_ms, 0, 5000))
+        return (
+            threshold,
+            blur_px,
+            dilate_px,
+            min_area,
+            max_area,
+            min_box_px,
+            lock_radius_px,
+            max_jump_px,
+            switch_margin,
+            smoothing,
+            hold_ms,
+        )
+
+    def get_orb_config(self):
+        try:
+            nfeatures = int(float(self.orb_nfeatures.get()))
+        except Exception:
+            nfeatures = 500
+        try:
+            fast_threshold = int(float(self.orb_fast_threshold.get()))
+        except Exception:
+            fast_threshold = 20
+        try:
+            edge_threshold = int(float(self.orb_edge_threshold.get()))
+        except Exception:
+            edge_threshold = 31
+        try:
+            min_response = float(self.orb_min_response.get())
+        except Exception:
+            min_response = 0.0005
+        try:
+            lock_radius_px = int(float(self.orb_lock_radius_px.get()))
+        except Exception:
+            lock_radius_px = 80
+        try:
+            max_jump_px = int(float(self.orb_max_jump_px.get()))
+        except Exception:
+            max_jump_px = 160
+        try:
+            switch_margin = float(self.orb_switch_margin.get())
+        except Exception:
+            switch_margin = 1.40
+        try:
+            smoothing = float(self.orb_smoothing.get())
+        except Exception:
+            smoothing = 0.35
+        try:
+            hold_ms = int(float(self.orb_hold_ms.get()))
+        except Exception:
+            hold_ms = 300
+
+        nfeatures = int(self.clamp(nfeatures, 1, 5000))
+        fast_threshold = int(self.clamp(fast_threshold, 1, 100))
+        edge_threshold = int(self.clamp(edge_threshold, 0, 200))
+        min_response = self.clamp(min_response, 0.0, 1.0)
+        lock_radius_px = int(self.clamp(lock_radius_px, 0, 2000))
+        max_jump_px = int(self.clamp(max_jump_px, 0, 4000))
+        switch_margin = self.clamp(switch_margin, 1.0, 20.0)
+        smoothing = self.clamp(smoothing, 0.0, 0.95)
+        hold_ms = int(self.clamp(hold_ms, 0, 5000))
+        return (
+            nfeatures,
+            fast_threshold,
+            edge_threshold,
+            min_response,
+            lock_radius_px,
+            max_jump_px,
+            switch_margin,
+            smoothing,
+            hold_ms,
+        )
+
+    @staticmethod
+    def point_distance(a, b):
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return (dx * dx + dy * dy) ** 0.5
+
+    def choose_stable_candidate(self, candidates, previous_point, previous_score, lock_radius_px, max_jump_px, switch_margin):
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        best = candidates[0]
+        if previous_point is None:
+            return best
+
+        scored = []
+        for cand in candidates:
+            dist = self.point_distance(cand[2], previous_point)
+            scored.append((dist, cand))
+
+        nearby = [item for item in scored if lock_radius_px > 0 and item[0] <= lock_radius_px]
+        if nearby:
+            nearby.sort(key=lambda item: item[1][0] - item[0] * 0.02, reverse=True)
+            local = nearby[0][1]
+            local_dist = nearby[0][0]
+            best_dist = self.point_distance(best[2], previous_point)
+            if best is local or best_dist <= lock_radius_px:
+                return local
+            if best[0] >= max(previous_score, local[0]) * switch_margin:
+                if max_jump_px <= 0 or best_dist <= max_jump_px:
+                    return best
+            return local
+
+        best_dist = self.point_distance(best[2], previous_point)
+        if max_jump_px > 0 and best_dist > max_jump_px:
+            return None
+        if previous_score > 0.0 and best[0] < previous_score * switch_margin:
+            return None
+        return best
+
+    def smooth_point(self, previous, raw, smoothing):
+        if previous is None or smoothing <= 0.0:
+            return raw
+        return (
+            previous[0] * smoothing + raw[0] * (1.0 - smoothing),
+            previous[1] * smoothing + raw[1] * (1.0 - smoothing),
+        )
+
+    def draw_tracking_point(self, frame, center, color, held=False):
+        cx, cy = int(round(center[0])), int(round(center[1]))
+        radius = 8 if not held else 10
+        cv2.circle(frame, (cx, cy), radius, color, 2)
+        cv2.circle(frame, (cx, cy), 2, color, -1)
+        cv2.line(frame, (cx - 12, cy), (cx - 4, cy), color, 2)
+        cv2.line(frame, (cx + 4, cy), (cx + 12, cy), color, 2)
+        cv2.line(frame, (cx, cy - 12), (cx, cy - 4), color, 2)
+        cv2.line(frame, (cx, cy + 4), (cx, cy + 12), color, 2)
+
+    def draw_persistent_track_markers(self, frame):
+        if self.contrast_enabled.get() and self.last_contrast_center is not None:
+            self.draw_tracking_point(frame, self.last_contrast_center, (255, 120, 0), held=True)
+        if self.orb_enabled.get() and self.last_orb_point is not None:
+            self.draw_tracking_point(frame, self.last_orb_point, (0, 150, 255), held=True)
+
+    def draw_contrast_overlay(self, frame, box, center, score, raw_count, valid_count, held=False):
+        cx, cy = int(round(center[0])), int(round(center[1]))
+        color = (255, 200, 0) if not held else (255, 120, 0)
+        label = "Contrast hold" if held else "Contrast"
+        self.set_contrast_status(f"{label}: valid={valid_count}/{raw_count}, score={score:.1f}, center={cx},{cy}")
+        self.draw_tracking_point(frame, center, color, held=held)
+
+    def run_contrast_tracker(self, frame, single=False):
+        if cv2 is None:
+            self.set_contrast_status("Contrast: OpenCV не установлен")
+            return frame
+
+        (
+            threshold,
+            blur_px,
+            dilate_px,
+            min_area,
+            max_area,
+            min_box_px,
+            lock_radius_px,
+            max_jump_px,
+            switch_margin,
+            smoothing,
+            hold_ms,
+        ) = self.get_contrast_config()
+        now = time.time()
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if blur_px > 1:
+            gray = cv2.GaussianBlur(gray, (blur_px, blur_px), 0)
+
+        lap = cv2.Laplacian(gray, cv2.CV_16S, ksize=3)
+        contrast = cv2.convertScaleAbs(lap)
+        _, mask = cv2.threshold(contrast, threshold, 255, cv2.THRESH_BINARY)
+
+        if dilate_px > 1:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.dilate(mask, kernel, iterations=1)
+
+        contours_result = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = contours_result[-2]
+        candidates = []
+        fh, fw = frame.shape[:2]
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            if area < min_area or area > max_area:
+                continue
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            if bw < min_box_px or bh < min_box_px:
+                continue
+            if x <= 0 and y <= 0 and x + bw >= fw - 1 and y + bh >= fh - 1:
+                continue
+
+            component_mask = gray.copy()
+            component_mask[:, :] = 0
+            cv2.drawContours(component_mask, [cnt], -1, 255, -1)
+            mean_contrast = float(cv2.mean(contrast, mask=component_mask)[0])
+            score = mean_contrast * (area ** 0.5)
+            cx = x + bw * 0.5
+            cy = y + bh * 0.5
+            candidates.append((score, (x, y, x + bw, y + bh), (cx, cy), area, mean_contrast))
+
+        if not candidates:
+            if self.last_contrast_center is not None and self.last_contrast_det is not None:
+                x1, y1, x2, y2, score = self.last_contrast_det
+                self.draw_contrast_overlay(
+                    frame,
+                    (x1, y1, x2, y2),
+                    self.last_contrast_center,
+                    score,
+                    len(contours),
+                    0,
+                    held=True,
+                )
+                return frame
+
+            self.set_contrast_status(f"Contrast: valid=0/{len(contours)}")
+            if single or time.time() - self.last_contrast_log_ts >= 2.0:
+                self.log(f"[CONTRAST] contours={len(contours)}, valid=0")
+                self.last_contrast_log_ts = time.time()
+            return frame
+
+        selected = self.choose_stable_candidate(
+            candidates,
+            self.last_contrast_center,
+            self.contrast_locked_score,
+            lock_radius_px,
+            max_jump_px,
+            switch_margin,
+        )
+        if selected is None:
+            if self.last_contrast_center is not None:
+                self.draw_contrast_overlay(
+                    frame,
+                    self.last_contrast_det[:4] if self.last_contrast_det else (0, 0, 0, 0),
+                    self.last_contrast_center,
+                    self.contrast_locked_score,
+                    len(contours),
+                    len(candidates),
+                    held=True,
+                )
+                return frame
+            self.set_contrast_status(f"Contrast: jump rejected, valid={len(candidates)}/{len(contours)}")
+            return frame
+
+        selected_score, selected_box, raw_center, selected_area, selected_mean = selected
+        center = self.smooth_point(self.contrast_smoothed_center, raw_center, smoothing)
+        self.contrast_smoothed_center = center
+        self.last_contrast_center = center
+        x1, y1, x2, y2 = selected_box
+        self.last_contrast_det = (x1, y1, x2, y2, selected_score)
+        self.contrast_locked_score = selected_score
+        self.last_contrast_seen_ts = now
+
+        self.draw_contrast_overlay(frame, selected_box, self.last_contrast_center, selected_score, len(contours), len(candidates))
+
+        if single or time.time() - self.last_contrast_log_ts >= 2.0:
+            self.log(
+                f"[CONTRAST] contours={len(contours)}, valid={len(candidates)}, "
+                f"score={selected_score:.1f}, mean={selected_mean:.1f}, area={selected_area:.0f}, box={selected_box}"
+            )
+            self.last_contrast_log_ts = time.time()
+        return frame
+
+    def draw_orb_overlay(self, frame, center, score, raw_count, valid_count, held=False):
+        cx, cy = int(round(center[0])), int(round(center[1]))
+        label = "ORB hold" if held else "ORB"
+        self.set_orb_status(f"{label}: valid={valid_count}/{raw_count}, response={score:.5f}, center={cx},{cy}")
+        color = (0, 220, 255) if not held else (0, 150, 255)
+        self.draw_tracking_point(frame, center, color, held=held)
+
+    def run_orb_tracker(self, frame, single=False):
+        if cv2 is None:
+            self.set_orb_status("ORB: OpenCV не установлен")
+            return frame
+
+        (
+            nfeatures,
+            fast_threshold,
+            edge_threshold,
+            min_response,
+            lock_radius_px,
+            max_jump_px,
+            switch_margin,
+            smoothing,
+            hold_ms,
+        ) = self.get_orb_config()
+        now = time.time()
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        orb = cv2.ORB_create(
+            nfeatures=nfeatures,
+            edgeThreshold=edge_threshold,
+            fastThreshold=fast_threshold,
+        )
+        keypoints = orb.detect(gray, None)
+        candidates = []
+        fh, fw = frame.shape[:2]
+        for kp in keypoints:
+            response = float(kp.response)
+            if response < min_response:
+                continue
+            x, y = kp.pt
+            if edge_threshold > 0 and (
+                x < edge_threshold or
+                y < edge_threshold or
+                x > fw - edge_threshold or
+                y > fh - edge_threshold
+            ):
+                continue
+            size_bonus = max(1.0, float(kp.size)) ** 0.5
+            score = response * size_bonus
+            candidates.append((score, None, (float(x), float(y)), response, kp.size))
+
+        if not candidates:
+            if self.last_orb_point is not None:
+                self.draw_orb_overlay(frame, self.last_orb_point, self.orb_locked_response, len(keypoints), 0, held=True)
+                return frame
+
+            self.set_orb_status(f"ORB: valid=0/{len(keypoints)}")
+            if single or time.time() - self.last_orb_log_ts >= 2.0:
+                self.log(f"[ORB] keypoints={len(keypoints)}, valid=0")
+                self.last_orb_log_ts = time.time()
+            return frame
+
+        selected = self.choose_stable_candidate(
+            candidates,
+            self.last_orb_point,
+            self.orb_locked_score,
+            lock_radius_px,
+            max_jump_px,
+            switch_margin,
+        )
+        if selected is None:
+            if self.last_orb_point is not None:
+                self.draw_orb_overlay(frame, self.last_orb_point, self.orb_locked_response, len(keypoints), len(candidates), held=True)
+                return frame
+            self.set_orb_status(f"ORB: jump rejected, valid={len(candidates)}/{len(keypoints)}")
+            return frame
+
+        selected_score, _, raw_center, selected_response, selected_size = selected
+        center = self.smooth_point(self.orb_smoothed_point, raw_center, smoothing)
+        self.orb_smoothed_point = center
+        self.last_orb_point = center
+        self.orb_locked_score = selected_score
+        self.orb_locked_response = selected_response
+        self.last_orb_seen_ts = now
+        self.draw_orb_overlay(frame, self.last_orb_point, selected_response, len(keypoints), len(candidates))
+
+        if single or time.time() - self.last_orb_log_ts >= 2.0:
+            self.log(
+                f"[ORB] keypoints={len(keypoints)}, valid={len(candidates)}, "
+                f"response={selected_response:.5f}, size={selected_size:.1f}, center={raw_center}"
+            )
+            self.last_orb_log_ts = time.time()
+        return frame
+
+    def send_center_target(self, center, frame_w, frame_h, tag, now, interval):
+        if not self.sock or center is None:
+            return False
+        if (now - self.last_send_ts) < interval:
+            return False
+
+        cx, cy = center
+        hfov = max(0.001, self.read_number_var(self.hfov, DEFAULT_CAMERA_HFOV_DEG))
+        vfov = max(0.001, self.read_number_var(self.vfov, DEFAULT_CAMERA_VFOV_DEG))
+        ref_x = self.calibrated_center_norm[0] * frame_w
+        ref_y = self.calibrated_center_norm[1] * frame_h
+        angle_x = ((cx - ref_x) / max(1, frame_w)) * hfov
+        angle_y = ((ref_y - cy) / max(1, frame_h)) * vfov
+        if self.invert_x.get():
+            angle_x = -angle_x
+        if self.invert_y.get():
+            angle_y = -angle_y
+        angle_x += self.read_number_var(self.yaw_trim_deg, 0.0)
+        angle_y += self.read_number_var(self.pitch_trim_deg, 0.0)
+        line = f"MSG:{tag};X:{angle_y:.2f};Y:{angle_x:.2f}\n"
+        if self.send_line(line, warn_title=tag, log_tx=False):
+            self.last_send_ts = now
+            return True
+        return False
 
     def draw_yolo_overlay(self, frame, box, conf, box_count, kept_count):
         x1, y1, x2, y2 = box
@@ -1189,6 +1883,14 @@ class App:
                     frame = self.run_yolo(frame)
                     self.last_det_ts = now
 
+                if self.contrast_enabled.get() and (now - self.last_contrast_ts) >= interval:
+                    frame = self.run_contrast_tracker(frame)
+                    self.last_contrast_ts = now
+
+                if self.orb_enabled.get() and (now - self.last_orb_ts) >= interval:
+                    frame = self.run_orb_tracker(frame)
+                    self.last_orb_ts = now
+
                 if self.hold_frame is not None and now < self.hold_until:
                     frame = self.hold_frame.copy()
                 elif self.hold_frame is not None and now >= self.hold_until:
@@ -1200,28 +1902,14 @@ class App:
                     if (now - self.last_manual_send_ts) >= interval:
                         if self.send_manual_target(log_tx=False, warn_invalid=False):
                             self.last_manual_send_ts = now
+                elif self.contrast_enabled.get() and self.contrast_send_enabled.get() and self.last_contrast_center is not None:
+                    self.send_center_target(self.last_contrast_center, fw, fh, "CONTRAST", now, interval)
+                elif self.orb_enabled.get() and self.orb_send_enabled.get() and self.last_orb_point is not None:
+                    self.send_center_target(self.last_orb_point, fw, fh, "ORB", now, interval)
                 elif self.send_enabled.get() and self.sock and self.last_det_center is not None:
-                    if (now - self.last_send_ts) >= interval:
-                        cx, cy = self.last_det_center
-                        hfov = max(0.001, self.read_number_var(self.hfov, DEFAULT_CAMERA_HFOV_DEG))
-                        vfov = max(0.001, self.read_number_var(self.vfov, DEFAULT_CAMERA_VFOV_DEG))
-                        ref_x = self.calibrated_center_norm[0] * fw
-                        ref_y = self.calibrated_center_norm[1] * fh
-                        angle_x = ((cx - ref_x) / max(1, fw)) * hfov
-                        angle_y = ((ref_y - cy) / max(1, fh)) * vfov
-                        if self.invert_x.get():
-                            angle_x = -angle_x
-                        if self.invert_y.get():
-                            angle_y = -angle_y
-                        angle_x += self.read_number_var(self.yaw_trim_deg, 0.0)
-                        angle_y += self.read_number_var(self.pitch_trim_deg, 0.0)
-                        line = f"MSG:PHONE;X:{angle_y:.2f};Y:{angle_x:.2f}\n"
-                        try:
-                            self.sock.sendall(line.encode("utf-8"))
-                            self.last_send_ts = now
-                        except Exception as e:
-                            self.log(f"[NET] Send error: {e}")
-                            self.disconnect_arduino()
+                    self.send_center_target(self.last_det_center, fw, fh, "PHONE", now, interval)
+
+                self.draw_persistent_track_markers(frame)
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, _ = frame_rgb.shape
