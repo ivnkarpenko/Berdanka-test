@@ -267,8 +267,10 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     char msgBuf[48];
     msgOnly.toCharArray(msgBuf, sizeof(msgBuf));
     msgBuf[30] = '\0';
-    Serial.print("Msg updated: ");
-    Serial.println(msgBuf);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Msg updated: ");
+      Serial.println(msgBuf);
+    }
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->print("ACK;MSGONLY:");
       replyClient->println(msgBuf);
@@ -278,8 +280,10 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     else lastUdpAliveMs = nowMs;
     displayFovXDeg = newFovXDeg;
     eraseOldBox();
-    Serial.print("Display FOV X updated: ");
-    Serial.println(displayFovXDeg, 2);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Display FOV X updated: ");
+      Serial.println(displayFovXDeg, 2);
+    }
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->print("ACK;CFG:FOV_X:");
       replyClient->println(displayFovXDeg, 2);
@@ -289,8 +293,10 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     else lastUdpAliveMs = nowMs;
     displayFovYDeg = newFovYDeg;
     eraseOldBox();
-    Serial.print("Display FOV Y updated: ");
-    Serial.println(displayFovYDeg, 2);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Display FOV Y updated: ");
+      Serial.println(displayFovYDeg, 2);
+    }
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->print("ACK;CFG:FOV_Y:");
       replyClient->println(displayFovYDeg, 2);
@@ -299,8 +305,10 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     if (fromTcp) lastTcpAliveMs = nowMs;
     else lastUdpAliveMs = nowMs;
     tcpPollIntervalMs = newTcpPollMs;
-    Serial.print("TCP poll interval updated: ");
-    Serial.println(tcpPollIntervalMs);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("TCP poll interval updated: ");
+      Serial.println(tcpPollIntervalMs);
+    }
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->print("ACK;CFG:TCP_POLL_MS:");
       replyClient->println(tcpPollIntervalMs);
@@ -310,37 +318,47 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     else lastUdpAliveMs = nowMs;
     boxSizePx = newBoxSizePx;
     eraseOldBox();
-    Serial.print("Box size updated: ");
-    Serial.println(boxSizePx);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Box size updated: ");
+      Serial.println(boxSizePx);
+    }
   } else if (parseBoxRefreshMsCommand(line, newBoxRefreshMs)) {
     if (fromTcp) lastTcpAliveMs = nowMs;
     else lastUdpAliveMs = nowMs;
     boxRefreshIntervalMs = newBoxRefreshMs;
-    Serial.print("Box refresh ms updated: ");
-    Serial.println(boxRefreshIntervalMs);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Box refresh ms updated: ");
+      Serial.println(boxRefreshIntervalMs);
+    }
   } else if (parseBoxRenderCommand(line, newBoxRenderEnabled)) {
     if (fromTcp) lastTcpAliveMs = nowMs;
     else lastUdpAliveMs = nowMs;
     boxRenderEnabled = newBoxRenderEnabled;
     if (!boxRenderEnabled) eraseOldBox();
-    Serial.print("Box render updated: ");
-    Serial.println(boxRenderEnabled ? "ON" : "OFF");
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Box render updated: ");
+      Serial.println(boxRenderEnabled ? "ON" : "OFF");
+    }
   } else if (parseBoxDeltaRenderCommand(line, newBoxDeltaRenderEnabled)) {
     if (fromTcp) lastTcpAliveMs = nowMs;
     else lastUdpAliveMs = nowMs;
     boxDeltaRenderEnabled = newBoxDeltaRenderEnabled;
-    Serial.print("Box delta render updated: ");
-    Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Box delta render updated: ");
+      Serial.println(boxDeltaRenderEnabled ? "ON" : "OFF");
+    }
   } else if (parseDisplayDegPerPxCommand(line, newDegPerPx)) {
     if (fromTcp) lastTcpAliveMs = nowMs;
     else lastUdpAliveMs = nowMs;
     displayFovXDeg = newDegPerPx * (float)SCREEN_W;
     displayFovYDeg = newDegPerPx * (float)SCREEN_H;
     eraseOldBox();
-    Serial.print("Legacy display deg/px converted to FOV X/Y: ");
-    Serial.print(displayFovXDeg, 2);
-    Serial.print("/");
-    Serial.println(displayFovYDeg, 2);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Legacy display deg/px converted to FOV X/Y: ");
+      Serial.print(displayFovXDeg, 2);
+      Serial.print("/");
+      Serial.println(displayFovYDeg, 2);
+    }
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->print("ACK;CFG:DEG_PER_PX:");
       replyClient->println(newDegPerPx, 4);
@@ -353,10 +371,12 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
     spawnPitchQ = targetBasisPitchQ;
     spawnYawQ = targetBasisYawQ;
     spawnSet    = true;
-    Serial.print("Target basis recentered: pitch=");
-    Serial.print(targetBasisPitchQ);
-    Serial.print(" yaw=");
-    Serial.println(targetBasisYawQ);
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("Target basis recentered: pitch=");
+      Serial.print(targetBasisPitchQ);
+      Serial.print(" yaw=");
+      Serial.println(targetBasisYawQ);
+    }
     if (ENABLE_PACKET_ACK && replyClient) {
       replyClient->println("ACK;CMD:CENTER");
     }
@@ -368,7 +388,7 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
       if (fromTcp) lastTcpAliveMs = nowMs;
       else lastUdpAliveMs = nowMs;
       // Target packet X/Y are offsets from the active basis. Startup basis is
-      // captured after the 15-second IMU warmup; CMD:CENTER can recenter it.
+      // captured after quick IMU zero; CMD:CENTER can recenter it.
       // Re-sending the same packet must be idempotent.
       spawnPitchQ = targetBasisPitchQ + quantizeDeg2((float)x);
       spawnYawQ   = wrapAngle180i(targetBasisYawQ + quantizeDeg2((float)y));
@@ -389,25 +409,33 @@ void processNetCommand(String line, int16_t pQ, int16_t yQ, uint32_t nowMs, WiFi
 }
 
 void wifiConnectAndStartServer() {
-  Serial.print("Starting AP: ");
-  Serial.println(WIFI_SSID);
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.print("Starting AP: ");
+    Serial.println(WIFI_SSID);
+  }
 
   int status = WL_IDLE_STATUS;
   while (status != WL_AP_LISTENING && status != WL_AP_CONNECTED) {
     status = WiFi.beginAP(WIFI_SSID, WIFI_PASS);
     delay(1000);
-    Serial.print(".");
+    if (ENABLE_SERIAL_DEBUG) Serial.print(".");
   }
-  Serial.println();
-  Serial.println("AP started.");
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.println();
+    Serial.println("AP started.");
+  }
 
   server.begin();
-  Serial.print("TCP server started on port ");
-  Serial.println(SERVER_PORT);
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.print("TCP server started on port ");
+    Serial.println(SERVER_PORT);
+  }
 
   udp.begin(SERVER_PORT);
-  Serial.print("UDP server started on port ");
-  Serial.println(SERVER_PORT);
+  if (ENABLE_SERIAL_DEBUG) {
+    Serial.print("UDP server started on port ");
+    Serial.println(SERVER_PORT);
+  }
 }
 
 NetState updateNetwork(int16_t pQ, int16_t yQ, uint32_t nowMs,
@@ -424,7 +452,7 @@ NetState updateNetwork(int16_t pQ, int16_t yQ, uint32_t nowMs,
         client.setTimeout(5);
         resetTcpRxBuffer();
         client.println("HELLO from UNO R4 WiFi");
-        Serial.println("Client connected.");
+        if (ENABLE_SERIAL_DEBUG) Serial.println("Client connected.");
         lastTcpAliveMs = nowMs;
         connectedNow = true;
       }
@@ -433,7 +461,7 @@ NetState updateNetwork(int16_t pQ, int16_t yQ, uint32_t nowMs,
       client.stop();
       resetTcpRxBuffer();
       connectedNow = false;
-      Serial.println("TCP heartbeat timeout.");
+      if (ENABLE_SERIAL_DEBUG) Serial.println("TCP heartbeat timeout.");
     }
     tcpConnectedCached = connectedNow;
     netPollUs = micros() - tcpPollStartUs;
@@ -466,10 +494,12 @@ NetState updateNetwork(int16_t pQ, int16_t yQ, uint32_t nowMs,
   state.udpConnected = (lastUdpAliveMs != 0 && (nowMs - lastUdpAliveMs <= UDP_ALIVE_TIMEOUT_MS));
 
   if (state.tcpConnected != lastTcpConnectedState || state.udpConnected != lastUdpConnectedState) {
-    Serial.print("NET state -> ");
-    if (state.tcpConnected) Serial.println("TCP OK");
-    else if (state.udpConnected) Serial.println("UDP OK");
-    else Serial.println("WAIT");
+    if (ENABLE_SERIAL_DEBUG) {
+      Serial.print("NET state -> ");
+      if (state.tcpConnected) Serial.println("TCP OK");
+      else if (state.udpConnected) Serial.println("UDP OK");
+      else Serial.println("WAIT");
+    }
     lastTcpConnectedState = state.tcpConnected;
     lastUdpConnectedState = state.udpConnected;
   }

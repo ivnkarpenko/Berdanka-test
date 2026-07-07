@@ -2,6 +2,7 @@
 
 #include <Adafruit_GFX.h>
 #include <ILI9488.h>
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include "app_state.h"
@@ -85,4 +86,84 @@ void drawNetStatus(bool tcpConnected, bool udpConnected) {
   drawStatusLineIfChanged(STATUS_X, STATUS_Y_TCP, line,
                           color, lastTcpStatusLine, sizeof(lastTcpStatusLine),
                           lastTcpStatusColor, 28);
+}
+
+static float clampFloat(float value, float lo, float hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+static void drawAngleBar(int16_t x, const char* label, float valueDeg,
+                         float rangeDeg, uint16_t color, bool force) {
+  constexpr int16_t barW = 42;
+  constexpr int16_t barTop = 72;
+  constexpr int16_t barH = 220;
+  constexpr int16_t midY = barTop + barH / 2;
+  constexpr int16_t labelY = 50;
+  constexpr int16_t labelW = 72;
+  constexpr int16_t innerXPad = 3;
+  constexpr int16_t innerW = barW - innerXPad * 2;
+
+  static int16_t lastAz = INT16_MIN;
+  static int16_t lastEl = INT16_MIN;
+  static int16_t lastCant = INT16_MIN;
+
+  int16_t* last = &lastAz;
+  if (label[0] == 'E') last = &lastEl;
+  else if (label[0] == 'C') last = &lastCant;
+
+  float normalized = clampFloat(valueDeg / rangeDeg, -1.0f, 1.0f);
+  int16_t halfH = barH / 2 - 3;
+  int16_t fillPx = (int16_t)lroundf(normalized * (float)halfH);
+
+  if (!force && fillPx == *last) return;
+
+  if (force || *last == INT16_MIN) {
+    tft.fillRect(x, labelY, labelW, 14, ILI9488_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9488_WHITE, ILI9488_BLACK);
+    tft.setCursor(x + 4, labelY);
+    tft.print(label);
+
+    tft.fillRect(x + 10, barTop, barW, barH, ILI9488_BLACK);
+    tft.drawRect(x + 10, barTop, barW, barH, ILI9488_DARKGREY);
+    tft.drawLine(x + 8, midY, x + 10 + barW + 2, midY, ILI9488_WHITE);
+  } else {
+    if (*last > 0) {
+      tft.fillRect(x + 10 + innerXPad, midY - *last, innerW, *last, ILI9488_BLACK);
+    } else if (*last < 0) {
+      tft.fillRect(x + 10 + innerXPad, midY, innerW, -*last, ILI9488_BLACK);
+    } else {
+      tft.drawLine(x + 10 + innerXPad, midY, x + 10 + innerXPad + innerW - 1, midY, ILI9488_BLACK);
+    }
+    tft.drawLine(x + 8, midY, x + 10 + barW + 2, midY, ILI9488_WHITE);
+  }
+
+  if (fillPx > 0) {
+    tft.fillRect(x + 10 + innerXPad, midY - fillPx, innerW, fillPx, color);
+  } else if (fillPx < 0) {
+    tft.fillRect(x + 10 + innerXPad, midY, innerW, -fillPx, color);
+  } else {
+    tft.drawLine(x + 10 + innerXPad, midY, x + 10 + innerXPad + innerW - 1, midY, color);
+  }
+
+  *last = fillPx;
+}
+
+void drawOrientationBars(float yawDeg, float pitchDeg, float rollDeg, bool force) {
+  if (force) {
+    tft.fillScreen(ILI9488_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9488_YELLOW, ILI9488_BLACK);
+    tft.setCursor(8, 24);
+    tft.print("QUAT VECTOR REL");
+    tft.drawLine(0, 68, SCREEN_W - 1, 68, ILI9488_DARKGREY);
+    tft.drawLine(160, 68, 160, SCREEN_H - 1, ILI9488_DARKGREY);
+    tft.drawLine(320, 68, 320, SCREEN_H - 1, ILI9488_DARKGREY);
+  }
+
+  drawAngleBar(40, "AZ", yawDeg, 90.0f, ILI9488_CYAN, force);
+  drawAngleBar(200, "EL", pitchDeg, 90.0f, ILI9488_GREEN, force);
+  drawAngleBar(360, "CANT", rollDeg, 180.0f, ILI9488_MAGENTA, force);
 }

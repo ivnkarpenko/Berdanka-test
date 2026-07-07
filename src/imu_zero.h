@@ -6,6 +6,8 @@ bool startIMU();
 void beginZeroWarmup(uint32_t nowMs);
 void resetZeroWarmupSamples();
 void addZeroWarmupSample(float roll, float pitch, float yaw, uint32_t nowMs);
+uint32_t getZeroWarmupStableMs(uint32_t nowMs);
+bool isZeroWarmupReady(uint32_t nowMs);
 bool getZeroWarmupAverage(float &roll, float &pitch, float &yaw);
 void applyZeroCalibration(float roll, float pitch, float yaw, uint32_t nowMs);
 void updateZeroCountdown(uint32_t nowMs);
