@@ -5,6 +5,8 @@ import queue
 import tkinter as tk
 import os
 import tempfile
+import glob
+import re
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk
@@ -36,6 +38,12 @@ except Exception:
     Image = None
     ImageTk = None
 
+try:
+    from tensorrt_backend import TensorRTEngine, TensorRTInferenceWorker
+except Exception:
+    TensorRTEngine = None
+    TensorRTInferenceWorker = None
+
 PORT_DEFAULT = 3333
 WIFI_SSID = "cisco"
 WIFI_PASS = "cisco1234"
@@ -50,8 +58,10 @@ DEFAULT_DISPLAY_FOV_X_DEG = DEFAULT_CAMERA_HFOV_DEG
 DEFAULT_DISPLAY_FOV_Y_DEG = DEFAULT_CAMERA_VFOV_DEG
 DEFAULT_YOLO_MODEL = "yolo11n.pt"
 QUADRO_YOLO_MODEL = "quadron_1280.onnx"
+QUADRO_TENSORRT_MODEL = "quadron_1280_fp16.engine"
 QUADRO_YOLO_IMGSZ = 1280
 MODEL_PRESETS = {
+    "Quadron 1280 TensorRT FP16 (.engine)": QUADRO_TENSORRT_MODEL,
     "YOLO11n (.pt)": DEFAULT_YOLO_MODEL,
     "Quadron 1280 ONNX (.onnx)": QUADRO_YOLO_MODEL,
 }
@@ -73,14 +83,17 @@ class App:
 
         # vision state
         self.cap = None
-        self.camera_index = tk.IntVar(value=0)
+        self.camera_source = tk.StringVar(value="0")
+        self.camera_resolution = tk.StringVar(value="Auto (camera default)")
+        self.camera_resolution_modes = {}
+        self.last_camera_devices = []
         self.camera_running = False
-        self.yolo_enabled = tk.BooleanVar(value=False)
+        self.yolo_enabled = tk.BooleanVar(value=not self.is_windows)
         self.send_enabled = tk.BooleanVar(value=False)
         self.show_center_cross = tk.BooleanVar(value=True)
         self.invert_x = tk.BooleanVar(value=False)
         self.invert_y = tk.BooleanVar(value=False)
-        self.rate_hz = tk.IntVar(value=5)
+        self.rate_hz = tk.IntVar(value=30)
         self.hfov = tk.DoubleVar(value=DEFAULT_CAMERA_HFOV_DEG)
         self.vfov = tk.DoubleVar(value=DEFAULT_CAMERA_VFOV_DEG)
         self.pitch_trim_deg = tk.DoubleVar(value=0.0)
@@ -105,14 +118,18 @@ class App:
         self.circle_send_hz = tk.StringVar(value="10")
         self.yolo_model = None
         self.yolo_backend = None
-        self.yolo_model_path = tk.StringVar(value=DEFAULT_YOLO_MODEL)
-        self.yolo_model_preset = tk.StringVar(value="YOLO11n (.pt)")
+        initial_model = QUADRO_TENSORRT_MODEL if not self.is_windows else DEFAULT_YOLO_MODEL
+        initial_preset = "Quadron 1280 TensorRT FP16 (.engine)" if not self.is_windows else "YOLO11n (.pt)"
+        self.yolo_model_path = tk.StringVar(value=initial_model)
+        self.yolo_model_preset = tk.StringVar(value=initial_preset)
         self.yolo_conf = tk.DoubleVar(value=0.10)
         self.yolo_imgsz = tk.IntVar(value=640)
         self.yolo_min_box_px = tk.IntVar(value=20)
         self.yolo_predict_imgsz = 640
         self.yolo_status = "YOLO: idle"
         self.last_yolo_log_ts = 0.0
+        self.tensorrt_worker = None
+        self.last_tensorrt_result = None
         self.contrast_enabled = tk.BooleanVar(value=False)
         self.contrast_send_enabled = tk.BooleanVar(value=False)
         self.contrast_threshold = tk.IntVar(value=35)
@@ -171,6 +188,9 @@ class App:
         self.build_ui()
         self.root.after(50, self.process_queue)
         self.root.after(30, self.update_camera)
+        self.root.after(250, self.poll_camera_devices)
+        if not self.is_windows:
+            self.root.after(500, self.load_model)
         self.log("[APP] Ready. 1) Connect Wi-Fi 2) Connect TCP 3) Send.")
 
     def build_ui(self):
@@ -443,23 +463,41 @@ class App:
         # Camera panel
         cam_bar = tk.Frame(right)
         cam_bar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
-        cam_bar.grid_columnconfigure(6, weight=1)
+        cam_bar.grid_columnconfigure(7, weight=1)
 
         tk.Label(cam_bar, text="Camera").grid(row=0, column=0, sticky="w")
-        self.ed_cam = tk.Entry(cam_bar, width=5)
-        self.ed_cam.insert(0, "0")
-        self.ed_cam.grid(row=0, column=1, padx=4)
+        self.camera_menu = ttk.Combobox(
+            cam_bar,
+            width=18,
+            textvariable=self.camera_source,
+            state="readonly",
+            values=("0",),
+        )
+        self.camera_menu.grid(row=0, column=1, padx=4, sticky="w")
+        self.camera_menu.bind("<<ComboboxSelected>>", self.on_camera_selected)
+        self.bt_cam_refresh = tk.Button(cam_bar, text="Refresh", command=lambda: self.refresh_cameras(log_changes=True))
+        self.bt_cam_refresh.grid(row=0, column=2, padx=3)
         self.bt_cam_start = tk.Button(cam_bar, text="Start", command=self.start_camera)
-        self.bt_cam_start.grid(row=0, column=2, padx=3)
+        self.bt_cam_start.grid(row=0, column=3, padx=3)
         self.bt_cam_stop = tk.Button(cam_bar, text="Stop", command=self.stop_camera, state="disabled")
-        self.bt_cam_stop.grid(row=0, column=3, padx=3)
-        tk.Label(cam_bar, text="Rate").grid(row=0, column=4, padx=(12, 2))
-        self.sc_rate = tk.Scale(cam_bar, from_=1, to=30, orient="horizontal", variable=self.rate_hz, length=95)
-        self.sc_rate.grid(row=0, column=5, sticky="w")
+        self.bt_cam_stop.grid(row=0, column=4, padx=3)
+        tk.Label(cam_bar, text="Rate").grid(row=0, column=5, padx=(12, 2))
+        self.sc_rate = tk.Scale(cam_bar, from_=1, to=60, orient="horizontal", variable=self.rate_hz, length=95)
+        self.sc_rate.grid(row=0, column=6, sticky="w")
         self.lb_res = tk.Label(cam_bar, text="Res: n/a")
-        self.lb_res.grid(row=0, column=6, padx=10, sticky="w")
+        self.lb_res.grid(row=0, column=7, padx=10, sticky="w")
+
+        tk.Label(cam_bar, text="Mode").grid(row=1, column=0, sticky="w")
+        self.camera_resolution_menu = ttk.Combobox(
+            cam_bar,
+            width=31,
+            textvariable=self.camera_resolution,
+            state="readonly",
+            values=("Auto (camera default)",),
+        )
+        self.camera_resolution_menu.grid(row=1, column=1, columnspan=3, padx=4, pady=(2, 0), sticky="w")
         self.lb_target_status = tk.Label(cam_bar, text="Target X=0.0 Y=0.0")
-        self.lb_target_status.grid(row=1, column=0, columnspan=7, padx=0, pady=(2, 0), sticky="w")
+        self.lb_target_status.grid(row=1, column=4, columnspan=4, padx=6, pady=(2, 0), sticky="w")
 
         self.canvas = tk.Canvas(right, bg="black", highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew", padx=6, pady=(2, 6))
@@ -986,7 +1024,7 @@ class App:
         model_path = MODEL_PRESETS.get(preset, preset)
         if model_path:
             self.yolo_model_path.set(model_path)
-            if model_path.lower().endswith(".onnx"):
+            if model_path.lower().endswith((".onnx", ".engine")):
                 self.yolo_imgsz.set(QUADRO_YOLO_IMGSZ)
             else:
                 self.yolo_imgsz.set(640)
@@ -994,7 +1032,7 @@ class App:
 
     def update_yolo_model_config(self):
         model_path = self.yolo_model_path.get().strip().lower()
-        if model_path.endswith(".onnx"):
+        if model_path.endswith((".onnx", ".engine")):
             self.yolo_predict_imgsz = QUADRO_YOLO_IMGSZ
             self.yolo_imgsz.set(QUADRO_YOLO_IMGSZ)
             return
@@ -1007,7 +1045,7 @@ class App:
 
     def get_yolo_predict_classes(self):
         model_path = self.yolo_model_path.get().strip().lower()
-        if model_path.endswith(".onnx"):
+        if model_path.endswith((".onnx", ".engine")):
             return None
         return [67]
 
@@ -1024,6 +1062,18 @@ class App:
         except Exception:
             min_box_px = 20
         return max(1, min(500, min_box_px))
+
+    def close_yolo_backend(self):
+        worker = self.tensorrt_worker
+        self.tensorrt_worker = None
+        if worker is not None:
+            try:
+                worker.close()
+            except Exception as e:
+                self.log(f"[TensorRT] Close warning: {e}")
+        self.last_tensorrt_result = None
+        self.yolo_model = None
+        self.yolo_backend = None
 
     def load_model(self):
         model_path_raw = self.yolo_model_path.get().strip()
@@ -1054,6 +1104,7 @@ class App:
                 "Place weights next to this script, for example:\n"
                 "  tools/yolo11n.pt\n"
                 "  tools/quadron_1280.onnx\n\n"
+                "  tools/quadron_1280_fp16.engine\n\n"
                 "Then select a preset or set Model path to that file."
             )
             self.yolo_model = None
@@ -1062,8 +1113,27 @@ class App:
             return
 
         try:
+            self.close_yolo_backend()
             self.update_yolo_model_config()
-            if model_path.lower().endswith(".onnx"):
+            if model_path.lower().endswith(".engine"):
+                if TensorRTEngine is None or TensorRTInferenceWorker is None:
+                    messagebox.showwarning(
+                        "YOLO",
+                        "TensorRT backend is unavailable. Run this GUI on Jetson with python3-libnvinfer installed.",
+                    )
+                    return
+                engine = TensorRTEngine(model_path)
+                if engine.input_shape != (1, 3, QUADRO_YOLO_IMGSZ, QUADRO_YOLO_IMGSZ):
+                    engine.close()
+                    raise RuntimeError(f"Unexpected TensorRT input shape: {engine.input_shape}")
+                self.tensorrt_worker = TensorRTInferenceWorker(engine, QUADRO_YOLO_IMGSZ)
+                self.yolo_model = engine
+                self.yolo_backend = "tensorrt_engine"
+                self.log(
+                    f"[TensorRT] Loaded engine: {model_path}; "
+                    f"input={engine.input_shape}, outputs={engine.output_shapes}"
+                )
+            elif model_path.lower().endswith(".onnx"):
                 if cv2 is None or np is None:
                     messagebox.showwarning("YOLO", "OpenCV and numpy are required for ONNX DNN inference.")
                     return
@@ -1085,40 +1155,198 @@ class App:
                 self.yolo_backend = "ultralytics"
                 self.log(f"[YOLO] Loaded model: {model_path} imgsz={self.yolo_predict_imgsz}")
         except Exception as e:
-            self.yolo_model = None
-            self.yolo_backend = None
+            self.close_yolo_backend()
             self.log(f"[YOLO] Failed to load local model: {model_path}; error: {e}")
             messagebox.showwarning("YOLO", f"Failed to load local model:\n{model_path}\n\n{e}")
+
+    @staticmethod
+    def camera_source_value(display_value):
+        value = str(display_value).strip()
+        if " — " in value:
+            value = value.split(" — ", 1)[0].strip()
+        if value.startswith("/dev/video"):
+            return value
+        try:
+            return int(value)
+        except Exception:
+            return value
+
+    def discover_camera_devices(self):
+        if os.name == "nt":
+            return [str(index) for index in range(6)]
+
+        devices = []
+        for path in sorted(glob.glob("/dev/video*")):
+            label = path
+            try:
+                result = subprocess.run(
+                    ["v4l2-ctl", "--device", path, "--info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+                device_caps = result.stdout.split("Device Caps", 1)[-1]
+                if "Video Capture" not in device_caps:
+                    continue
+                match = re.search(r"Card type\s*:\s*(.+)", result.stdout)
+                if match:
+                    label = f"{path} — {match.group(1).strip()}"
+            except Exception:
+                pass
+            devices.append(label)
+        return devices
+
+    def refresh_cameras(self, log_changes=False):
+        devices = self.discover_camera_devices()
+        if not devices:
+            devices = ["0"]
+        previous_source = self.camera_source_value(self.camera_source.get())
+        previous_devices = self.last_camera_devices
+        self.last_camera_devices = devices
+        self.camera_menu.configure(values=devices)
+
+        selected = None
+        for value in devices:
+            if self.camera_source_value(value) == previous_source:
+                selected = value
+                break
+        if selected is None:
+            selected = devices[0]
+        changed = selected != self.camera_source.get() or devices != previous_devices
+        self.camera_source.set(selected)
+        if changed:
+            self.refresh_camera_modes()
+        if log_changes:
+            self.log(f"[CAM] Devices: {', '.join(devices)}")
+
+    def poll_camera_devices(self):
+        try:
+            if not self.camera_running:
+                self.refresh_cameras(log_changes=False)
+        finally:
+            self.root.after(2000, self.poll_camera_devices)
+
+    def on_camera_selected(self, _event=None):
+        if not self.camera_running:
+            self.refresh_camera_modes()
+
+    def query_camera_modes(self, source):
+        if os.name == "nt" or not str(source).startswith("/dev/video"):
+            return []
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--device", str(source), "--list-formats-ext"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception as e:
+            self.log(f"[CAM] Cannot query modes for {source}: {e}")
+            return []
+
+        modes = {}
+        current_fourcc = ""
+        current_size = None
+        for line in result.stdout.splitlines():
+            format_match = re.search(r"\[\d+\]:\s+'([^']+)'", line)
+            if format_match:
+                current_fourcc = format_match.group(1).strip()
+                current_size = None
+                continue
+            size_match = re.search(r"Size:\s+Discrete\s+(\d+)x(\d+)", line)
+            if size_match:
+                current_size = (int(size_match.group(1)), int(size_match.group(2)))
+                modes.setdefault((current_fourcc, *current_size), 0.0)
+                continue
+            fps_match = re.search(r"\(([0-9.]+)\s+fps\)", line)
+            if fps_match and current_size is not None:
+                key = (current_fourcc, *current_size)
+                modes[key] = max(modes.get(key, 0.0), float(fps_match.group(1)))
+
+        return sorted(
+            [(width, height, fps, fourcc) for (fourcc, width, height), fps in modes.items()],
+            key=lambda mode: (mode[0] * mode[1], mode[2], mode[3]),
+            reverse=True,
+        )
+
+    def refresh_camera_modes(self):
+        source = self.camera_source_value(self.camera_source.get())
+        modes = self.query_camera_modes(source)
+        mode_map = {"Auto (camera default)": None}
+        for width, height, fps, fourcc in modes:
+            fps_text = f"{fps:g}" if fps > 0 else "default"
+            label = f"{width}x{height} @ {fps_text} fps"
+            if fourcc:
+                label += f" ({fourcc})"
+            mode_map[label] = (width, height, fps, fourcc)
+        self.camera_resolution_modes = mode_map
+        labels = tuple(mode_map.keys())
+        self.camera_resolution_menu.configure(values=labels)
+        current_mode = self.camera_resolution.get()
+        if modes and (current_mode not in mode_map or current_mode == "Auto (camera default)"):
+            preferred = min(
+                modes,
+                key=lambda mode: (
+                    abs(mode[0] - QUADRO_YOLO_IMGSZ) + abs(mode[1] - QUADRO_YOLO_IMGSZ),
+                    -mode[2],
+                ),
+            )
+            preferred_label = next(
+                (label for label, value in mode_map.items() if value == preferred),
+                labels[0],
+            )
+            self.camera_resolution.set(preferred_label)
+        elif current_mode not in mode_map:
+            self.camera_resolution.set(labels[0])
+        if modes:
+            self.log(
+                f"[CAM] Found {len(modes)} mode(s) for {source}; "
+                f"selected {self.camera_resolution.get()}"
+            )
 
     def start_camera(self):
         if cv2 is None:
             messagebox.showwarning("Camera", "opencv-python not installed. Install: pip install opencv-python")
             return
-        try:
-            idx = int(self.ed_cam.get().strip())
-        except Exception:
-            messagebox.showwarning("Camera", "Camera index must be a number.")
-            return
+
+        source = self.camera_source_value(self.camera_source.get())
 
         self.stop_camera()
-        self.cap = cv2.VideoCapture(idx)
+        if os.name != "nt" and str(source).startswith("/dev/video"):
+            self.cap = cv2.VideoCapture(str(source), cv2.CAP_V4L2)
+        else:
+            self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
             self.cap = None
-            messagebox.showwarning("Camera", "Cannot open camera.")
+            messagebox.showwarning("Camera", f"Cannot open camera: {source}")
             return
+
+        selected_mode = self.camera_resolution_modes.get(self.camera_resolution.get())
         try:
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, DEFAULT_CAMERA_FRAME_W)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DEFAULT_CAMERA_FRAME_H)
+            if selected_mode is not None:
+                width, height, fps, fourcc = selected_mode
+                if fourcc and len(fourcc) == 4:
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                if fps > 0:
+                    self.cap.set(cv2.CAP_PROP_FPS, fps)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS))
 
         self.camera_running = True
         self.bt_cam_start.configure(state="disabled")
         self.bt_cam_stop.configure(state="normal")
-        self.log(f"[CAM] Started camera {idx} at {actual_w}x{actual_h}")
+        self.camera_menu.configure(state="disabled")
+        self.camera_resolution_menu.configure(state="disabled")
+        self.bt_cam_refresh.configure(state="disabled")
+        self.log(f"[CAM] Started camera {source} at {actual_w}x{actual_h} @ {actual_fps:g} fps")
 
     def stop_camera(self):
         self.camera_running = False
@@ -1131,6 +1359,9 @@ class App:
         self.camera_view = None
         self.bt_cam_start.configure(state="normal")
         self.bt_cam_stop.configure(state="disabled")
+        self.camera_menu.configure(state="readonly")
+        self.camera_resolution_menu.configure(state="readonly")
+        self.bt_cam_refresh.configure(state="normal")
 
     def single_detect(self):
         self.single_request = True
@@ -1745,6 +1976,106 @@ class App:
         self.draw_yolo_overlay(frame, selected_box, selected_conf, len(boxes_1280), len(candidates))
         return frame
 
+    def consume_tensorrt_result(self):
+        if self.tensorrt_worker is None:
+            return
+        result = self.tensorrt_worker.latest_result()
+        if result is None:
+            return
+        if result.get("error"):
+            self.last_tensorrt_result = None
+            self.last_det = None
+            self.last_det_center = None
+            self.yolo_status = f"TensorRT error: {result['error']}"
+            self.log(f"[TensorRT] Inference error: {result['error']}")
+            return
+
+        self.last_tensorrt_result = result
+        selected = result.get("selected")
+        if selected is None:
+            self.last_det = None
+            self.last_det_center = None
+            self.yolo_status = (
+                f"TRT kept=0/{result.get('raw_count', 0)} "
+                f"total={result.get('total_ms', 0.0):.1f}ms"
+            )
+        else:
+            x1, y1, x2, y2 = selected["box"]
+            confidence = selected["confidence"]
+            self.last_det = (x1, y1, x2, y2, confidence)
+            self.last_det_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+            self.yolo_status = (
+                f"TRT {confidence:.2f} center={self.last_det_center[0]},{self.last_det_center[1]} "
+                f"infer={result.get('inference_ms', 0.0):.1f}ms "
+                f"total={result.get('total_ms', 0.0):.1f}ms"
+            )
+
+        if result.get("single"):
+            self.hold_until = time.time() + 5.0
+            self.log(
+                f"[TensorRT] Single detect: raw={result.get('raw_count', 0)}, "
+                f"kept={result.get('kept_count', 0)}, valid={len(result.get('candidates', []))}, "
+                f"selected={selected}, total={result.get('total_ms', 0.0):.2f} ms"
+            )
+        elif time.time() - self.last_yolo_log_ts >= 2.0:
+            self.log(f"[TensorRT] {self.yolo_status}")
+            self.last_yolo_log_ts = time.time()
+
+    def submit_tensorrt(self, frame, single=False):
+        if self.tensorrt_worker is None:
+            if single:
+                messagebox.showwarning("YOLO", "TensorRT engine is not loaded.")
+            return False
+        self.tensorrt_worker.submit(
+            frame,
+            self.get_yolo_conf(),
+            self.get_yolo_min_box_px(),
+            single=single,
+        )
+        return True
+
+    def draw_tensorrt_overlay(self, frame):
+        result = self.last_tensorrt_result
+        if not result or result.get("error"):
+            return frame
+        if result.get("frame_size") != (frame.shape[1], frame.shape[0]):
+            return frame
+        selected = result.get("selected")
+        if selected is None:
+            return frame
+
+        selected_box = selected["box"]
+        for candidate in result.get("candidates", []):
+            box = candidate["box"]
+            if box == selected_box:
+                continue
+            cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 1)
+
+        x1, y1, x2, y2 = selected_box
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+        cv2.rectangle(frame, (8, 8), (min(frame.shape[1] - 1, 600), 42), (0, 0, 0), -1)
+        cv2.putText(
+            frame,
+            self.yolo_status,
+            (14, 33),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"target {selected['confidence']:.2f}",
+            (max(0, x1), max(24, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            3,
+        )
+        return frame
+
     def run_yolo(self, frame, single=False):
         if self.yolo_model is None:
             if single:
@@ -1752,6 +2083,8 @@ class App:
             return frame
 
         try:
+            if self.yolo_backend == "tensorrt_engine":
+                return frame
             if self.yolo_backend == "opencv_onnx":
                 return self.run_opencv_onnx(frame, single=single)
 
@@ -1874,14 +2207,25 @@ class App:
                 self.last_frame = frame
                 interval = 1.0 / max(1, int(self.rate_hz.get()))
 
-                if self.single_request:
-                    frame = self.run_yolo(frame, single=True)
-                    self.hold_frame = frame.copy()
-                    self.hold_until = now + 5.0
-                    self.single_request = False
-                elif self.yolo_enabled.get() and (now - self.last_det_ts) >= interval:
-                    frame = self.run_yolo(frame)
-                    self.last_det_ts = now
+                if self.yolo_backend == "tensorrt_engine":
+                    self.consume_tensorrt_result()
+                    if self.single_request:
+                        self.submit_tensorrt(frame, single=True)
+                        self.single_request = False
+                    elif self.yolo_enabled.get() and (now - self.last_det_ts) >= interval:
+                        self.submit_tensorrt(frame)
+                        self.last_det_ts = now
+                    if self.yolo_enabled.get() or now < self.hold_until:
+                        frame = self.draw_tensorrt_overlay(frame)
+                else:
+                    if self.single_request:
+                        frame = self.run_yolo(frame, single=True)
+                        self.hold_frame = frame.copy()
+                        self.hold_until = now + 5.0
+                        self.single_request = False
+                    elif self.yolo_enabled.get() and (now - self.last_det_ts) >= interval:
+                        frame = self.run_yolo(frame)
+                        self.last_det_ts = now
 
                 if self.contrast_enabled.get() and (now - self.last_contrast_ts) >= interval:
                     frame = self.run_contrast_tracker(frame)
@@ -1957,6 +2301,8 @@ def main():
     app = App(root)
 
     def on_close():
+        app.stop_camera()
+        app.close_yolo_backend()
         app.disconnect_arduino()
         root.destroy()
 

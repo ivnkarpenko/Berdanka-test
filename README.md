@@ -163,8 +163,23 @@ python tools/windows_tcp_gui.py
 Linux/Jetson:
 
 ```bash
+cd ~/ivank/Berdanka-test
+sudo nvpmodel -m 8
+sudo jetson_clocks
 python3 tools/jetson_tcp_gui.py
 ```
+
+На Jetson GUI по умолчанию выбирает `Quadron 1280 TensorRT FP16 (.engine)`,
+загружает `tools/quadron_1280_fp16.engine` и включает YOLO detection. Engine
+собирается для конкретного Jetson/TensorRT и поэтому игнорируется Git через
+`*.engine`; его нужно хранить или копировать отдельно от репозитория.
+
+USB-камеры обнаруживаются автоматически каждые две секунды. Поле `Camera`
+показывает доступные `/dev/video*`, а поле `Mode` заполняется поддерживаемыми
+разрешениями, FPS и форматами из `v4l2-ctl`. `Auto (camera default)` оставляет
+выбор драйверу камеры. При первом обнаружении GUI выбирает доступный режим,
+ближайший к входу Quadron `1280x1280`. После выбора нажмите `Start`; TensorRT inference идет в
+отдельном worker-потоке, а устаревшие кадры отбрасываются.
 
 Jetson Wi-Fi control panel:
 
